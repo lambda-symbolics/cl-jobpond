@@ -168,7 +168,7 @@ A job may name its ancestors with =:owner-identifiers=, outermost first, and the
 tree it belongs to with =:root-identifier=. A job is a descendant of every
 identifier in its owner list, so =job-pool-descendant-jobs= finds a whole subtree
 in one pass however deep it is, and =job-cancel= with =:cascade-p= cancels that
-subtree. The job itself is cancelled first, so a body that spawns children stops
+subtree and returns the descendants it took. The job itself is cancelled first, so a body that spawns children stops
 adding to the subtree before the subtree is walked; a descendant admitted after
 the walk is not reached, so a caller needing a guaranteed empty subtree cancels
 and then re-checks.

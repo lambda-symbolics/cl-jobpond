@@ -1094,8 +1094,11 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
             (job-cancel root :reason :superseded :cascade-p t)
           (test-assert accepted-p
                        "a cascading cancellation accepts the job itself")
-          (test-assert (= cascaded 2)
-                       "a cascading cancellation reports the descendants it took"))
+          (test-assert (= (length cascaded) 2)
+                       "a cascading cancellation reports the descendants it took")
+          (test-assert (and (member child cascaded :test #'eq)
+                            (member grandchild cascaded :test #'eq))
+                       "a cascading cancellation names the jobs it cancelled"))
         (test-assert (tests--wait-until
                       (lambda ()
                         (and (job-terminal-p root)

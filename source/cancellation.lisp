@@ -46,8 +46,8 @@ is nothing left to cancel in them."
 (defun job-cancel (job &key (reason :cancelled) cascade-p)
   "Request cancellation of JOB for REASON and return T when this call accepted it.
 
-With CASCADE-P, every live descendant of JOB is cancelled too, and the number of
-descendants this call accepted is returned as a second value. JOB is cancelled
+With CASCADE-P, every live descendant of JOB is cancelled too, and the
+descendants this call accepted are returned as a second value. JOB is cancelled
 first, so a body that spawns children stops adding to the subtree before the
 subtree is walked. A descendant admitted after the walk is not reached, so a
 caller that must guarantee an empty subtree cancels and then re-checks.
@@ -66,13 +66,13 @@ An interrupt is best effort. A body that blocks where the host cannot deliver
 interrupts stops at its next JOB-CHECK-CANCELLATION or JOB-REPORT-PROGRESS call
 instead."
   (let ((accepted-p (job--cancel-one job reason))
-        (cascaded 0))
+        (cascaded nil))
     (when cascade-p
       (dolist (descendant (job-pool-descendant-jobs (job-pool job)
                                                     (job-identifier job)))
         (when (job--cancel-one descendant reason)
-          (incf cascaded))))
-    (values accepted-p cascaded)))
+          (push descendant cascaded))))
+    (values accepted-p (nreverse cascaded))))
 
 (defun job--cancel-one (job reason)
   "Request cancellation of exactly JOB for REASON, ignoring any descendants."
