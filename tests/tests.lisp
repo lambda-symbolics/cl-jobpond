@@ -1027,6 +1027,109 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
 
 ;;;; -- Entry Point --
 
+(defun tests--ancestry-cascade ()
+  "Exercise job ancestry, descendant lookup, and cascading cancellation."
+  (let ((started (tests--make-gate))
+        (never (tests--make-gate)))
+    (with-test-pool (pool :name "cl-jobpond test cascade"
+                          :maximum-concurrency 4)
+      (let* ((root (job-pool-submit pool
+                                    (lambda (job)
+                                      (declare (ignore job))
+                                      (tests--gate-open started)
+                                      (tests--gate-await never
+                                                         :timeout-seconds 60)
+                                      :root-finished)
+                                    :name "root"
+                                    :root-identifier "tree"))
+             (root-identifier (job-identifier root))
+             (child (job-pool-submit pool
+                                     (lambda (job)
+                                       (declare (ignore job))
+                                       (tests--gate-await never
+                                                          :timeout-seconds 60)
+                                       :child-finished)
+                                     :name "child"
+                                     :owner-identifiers (list root-identifier)
+                                     :root-identifier "tree"))
+             (grandchild (job-pool-submit
+                          pool
+                          (lambda (job)
+                            (declare (ignore job))
+                            (tests--gate-await never :timeout-seconds 60)
+                            :grandchild-finished)
+                          :name "grandchild"
+                          :owner-identifiers
+                          (list root-identifier (job-identifier child))
+                          :root-identifier "tree"))
+             (stranger (job-pool-submit pool
+                                        (lambda (job)
+                                          (declare (ignore job))
+                                          :stranger-finished)
+                                        :name "stranger")))
+        (test-assert (equal (job-owner-identifiers grandchild)
+                            (list root-identifier (job-identifier child)))
+                     "a job records its ancestors outermost first")
+        (test-assert (string= (job-root-identifier child) "tree")
+                     "a job records the tree it belongs to")
+        (test-assert (null (job-owner-identifiers stranger))
+                     "a job with no ancestors records none")
+        (test-assert (tests--gate-await started)
+                     "the root job started")
+        (test-assert (eq (job-state stranger) :completed)
+                     "an unrelated job is unaffected by the subtree")
+        (let ((descendants (job-pool-descendant-jobs pool root-identifier)))
+          (test-assert (= (length descendants) 2)
+                       "descendant lookup finds the whole subtree")
+          (test-assert (and (member child descendants :test #'eq)
+                            (member grandchild descendants :test #'eq))
+                       "descendant lookup finds children and grandchildren")
+          (test-assert (not (member stranger descendants :test #'eq))
+                       "descendant lookup excludes unrelated jobs")
+          (test-assert (not (member root descendants :test #'eq))
+                       "descendant lookup excludes the job itself"))
+        (multiple-value-bind (accepted-p cascaded)
+            (job-cancel root :reason :superseded :cascade-p t)
+          (test-assert accepted-p
+                       "a cascading cancellation accepts the job itself")
+          (test-assert (= cascaded 2)
+                       "a cascading cancellation reports the descendants it took"))
+        (test-assert (tests--wait-until
+                      (lambda ()
+                        (and (job-terminal-p root)
+                             (job-terminal-p child)
+                             (job-terminal-p grandchild)))
+                      :timeout-seconds 60)
+                     "every job in the subtree reaches a terminal state")
+        (test-assert (eq (job-state root) :aborted)
+                     "the cancelled root is aborted")
+        (test-assert (eq (job-state child) :aborted)
+                     "a cascaded child is aborted")
+        (test-assert (eq (job-state grandchild) :aborted)
+                     "a cascaded grandchild is aborted")
+        (test-assert (eq (job-cancellation-reason grandchild) :superseded)
+                     "a cascaded job records the reason the root was given")
+        (test-assert (eq (job-state stranger) :completed)
+                     "an unrelated job survives the cascade")
+        (test-assert (null (job-pool-descendant-jobs pool root-identifier))
+                     "a cancelled subtree has no live descendants left")
+        (tests--gate-open never))))
+  (with-test-pool (pool :name "cl-jobpond test ancestry validation")
+    (dolist (entry (list (list :function #'identity :owner-identifiers "root")
+                         (list :function #'identity :owner-identifiers '(""))
+                         (list :function #'identity :owner-identifiers '(:root))
+                         (list :function #'identity :root-identifier "")
+                         (list :function #'identity :root-identifier :tree)))
+      (test-assert
+       (handler-case
+           (progn (job-pool-submit-batch pool (list entry)) nil)
+         (job-pool-invalid-entry ()
+           t))
+       (format nil "~S is refused as a malformed ancestry entry" entry))
+      (test-assert (zerop (job-pool-live-count pool))
+                   "a refused ancestry entry admits nothing")))
+  nil)
+
 (defun run-tests ()
   "Run every cl-jobpond regression test."
   (setf *test-count* 0)
@@ -1036,6 +1139,7 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
   (tests--admission-bounds)
   (tests--invalid-limits)
   (tests--interrupt-guard)
+  (tests--ancestry-cascade)
   (tests--running-cancellation)
   (tests--queued-cancellation)
   (tests--cooperative-cancellation)

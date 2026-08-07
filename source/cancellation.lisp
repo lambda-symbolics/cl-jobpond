@@ -31,8 +31,26 @@ the run being examined."
 
 ;;;; -- Cancellation --
 
-(defun job-cancel (job &key (reason :cancelled))
+(defun job-pool-descendant-jobs (pool identifier)
+  "Return POOL's live jobs descended from the job named IDENTIFIER.
+
+A job records every ancestor identifier, so descent is a membership test and one
+pass finds a whole subtree however deep it is. Terminal jobs are left out: there
+is nothing left to cancel in them."
+  (remove-if-not
+   (lambda (job)
+     (and (not (job--terminal-state-p (job-state job)))
+          (member identifier (job-owner-identifiers job) :test #'string=)))
+   (job-pool-list-jobs pool)))
+
+(defun job-cancel (job &key (reason :cancelled) cascade-p)
   "Request cancellation of JOB for REASON and return T when this call accepted it.
+
+With CASCADE-P, every live descendant of JOB is cancelled too, and the number of
+descendants this call accepted is returned as a second value. JOB is cancelled
+first, so a body that spawns children stops adding to the subtree before the
+subtree is walked. A descendant admitted after the walk is not reached, so a
+caller that must guarantee an empty subtree cancels and then re-checks.
 
 Cancellation is first-writer: the first accepted request records REASON, and
 later requests return NIL rather than recording a second reason or interrupting
@@ -47,6 +65,17 @@ interrupt cannot strike whichever job that worker runs next.
 An interrupt is best effort. A body that blocks where the host cannot deliver
 interrupts stops at its next JOB-CHECK-CANCELLATION or JOB-REPORT-PROGRESS call
 instead."
+  (let ((accepted-p (job--cancel-one job reason))
+        (cascaded 0))
+    (when cascade-p
+      (dolist (descendant (job-pool-descendant-jobs (job-pool job)
+                                                    (job-identifier job)))
+        (when (job--cancel-one descendant reason)
+          (incf cascaded))))
+    (values accepted-p cascaded)))
+
+(defun job--cancel-one (job reason)
+  "Request cancellation of exactly JOB for REASON, ignoring any descendants."
   (let ((pool (job-pool job))
         (thread nil)
         (run-token nil)

@@ -218,6 +218,16 @@
     :initarg :payload
     :reader job-payload
     :documentation "The caller-supplied value the job body may consult.")
+   (owner-identifiers
+    :initarg :owner-identifiers
+    :reader job-owner-identifiers
+    :type list
+    :documentation "The identifiers of this job's ancestors, outermost first.")
+   (root-identifier
+    :initarg :root-identifier
+    :reader job-root-identifier
+    :type (or null string)
+    :documentation "The identifier naming the tree this job belongs to, or NIL.")
    (body-function
     :initarg :body-function
     :reader job--body-function

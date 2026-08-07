@@ -43,6 +43,7 @@
            #:job-name
            #:job-not-found
            #:job-not-found-identifier
+           #:job-owner-identifiers
            #:job-payload
            #:job-pool
            #:job-pool-active-count
@@ -55,8 +56,11 @@
            #:job-pool-close
            #:job-pool-closed
            #:job-pool-closed-lifecycle-state
+           #:job-pool-descendant-jobs
            #:job-pool-detach
+           #:job-pool-descendant-jobs
            #:job-pool-detach-refused
+           #:job-pool-descendant-jobs
            #:job-pool-detach-refused-reason
            #:job-pool-emit
            #:job-pool-error
@@ -85,6 +89,7 @@
            #:job-progress-snapshot
            #:job-report-progress
            #:job-result
+           #:job-root-identifier
            #:job-run-inline
            #:job-run-token
            #:job-snapshot
@@ -121,7 +126,8 @@
                 #:job-name
                 #:job-not-found
                 #:job-not-found-identifier
-                #:job-payload
+                #:job-owner-identifiers
+           #:job-payload
                 #:job-pool-active-count
                 #:job-pool-add-listener
                 #:job-pool-capacity-exceeded
@@ -131,9 +137,12 @@
                 #:job-pool-capacity-exceeded-requested-count
                 #:job-pool-close
                 #:job-pool-closed
-                #:job-pool-detach
-                #:job-pool-detach-refused
-                #:job-pool-detach-refused-reason
+                #:job-pool-descendant-jobs
+           #:job-pool-detach
+                #:job-pool-descendant-jobs
+           #:job-pool-detach-refused
+                #:job-pool-descendant-jobs
+           #:job-pool-detach-refused-reason
                 #:job-pool-emit
                 #:job-pool-error
                 #:job-pool-find-job
@@ -153,6 +162,7 @@
                 #:job-progress-snapshot
                 #:job-report-progress
                 #:job-result
+           #:job-root-identifier
                 #:job-run-inline
                 #:job-run-token
                 #:job-snapshot

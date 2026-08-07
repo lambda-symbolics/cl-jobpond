@@ -21,6 +21,28 @@
                                   :minimum 0)
         (job-pool-maximum-runtime-milliseconds pool))))
 
+(defun job-pool--entry-owner-identifiers (entry)
+  "Return ENTRY's validated ancestor identifiers, outermost first."
+  (let ((owners (getf entry :owner-identifiers)))
+    (unless (and (listp owners)
+                 (every (lambda (owner)
+                          (and (stringp owner) (plusp (length owner))))
+                        owners))
+      (error 'job-pool-invalid-entry
+             :message ":OWNER-IDENTIFIERS must be a list of non-empty strings."
+             :entry entry))
+    (copy-list owners)))
+
+(defun job-pool--entry-root-identifier (entry)
+  "Return ENTRY's validated tree identifier, or NIL when it names no tree."
+  (let ((root (getf entry :root-identifier)))
+    (unless (or (null root)
+                (and (stringp root) (plusp (length root))))
+      (error 'job-pool-invalid-entry
+             :message ":ROOT-IDENTIFIER must be NIL or a non-empty string."
+             :entry entry))
+    root))
+
 (defun job-pool--entry-name (entry)
   "Return ENTRY's descriptive name or signal JOB-POOL-INVALID-ENTRY."
   (let ((name (and (listp entry) (getf entry :name))))
@@ -48,6 +70,8 @@ reserving names and terminal retention can evict a job without freeing a name."
                    :index index
                    :name name
                    :payload (getf entry :payload)
+                   :owner-identifiers (getf entry :owner-identifiers)
+                   :root-identifier (getf entry :root-identifier)
                    :body-function (getf entry :function)
                    :maximum-runtime-milliseconds
                    (getf entry :maximum-runtime-milliseconds))))
@@ -60,6 +84,11 @@ only argument. :NAME gives the job a readable identifier fragment, :PAYLOAD is
 carried on the job for the body to read, and :MAXIMUM-RUNTIME-MILLISECONDS
 overrides the pool wall-clock cap for that job alone.
 
+:OWNER-IDENTIFIERS names this job's ancestors, outermost first, and
+:ROOT-IDENTIFIER names the tree it belongs to. Both are what makes a cascading
+cancellation possible: a job is a descendant of every identifier in its owner
+list, so one pass over the pool finds a whole subtree.
+
 Admission is all or nothing. Entries are validated and normalized before the pool
 lock is taken, and the batch-size and live-job bounds are checked under that same
 lock as the jobs enter the queue, so a refused batch admits nothing and a batch
@@ -71,6 +100,10 @@ or JOB-POOL-CLOSED and leaves the pool untouched."
                      (list :function (job-pool--entry-function entry)
                            :name (job-pool--entry-name entry)
                            :payload (getf entry :payload)
+                           :owner-identifiers
+                           (job-pool--entry-owner-identifiers entry)
+                           :root-identifier
+                           (job-pool--entry-root-identifier entry)
                            :maximum-runtime-milliseconds
                            (job-pool--entry-runtime pool entry)))
                    entries))
@@ -117,7 +150,8 @@ or JOB-POOL-CLOSED and leaves the pool untouched."
     (job-pool--ensure-monitor pool)
     jobs))
 
-(defun job-pool-submit (pool function &key name payload
+(defun job-pool-submit (pool function &key name payload owner-identifiers
+                                        root-identifier
                                         maximum-runtime-milliseconds)
   "Admit one job running FUNCTION into POOL and return the job.
 
@@ -129,6 +163,8 @@ signalling any other error publishes :FAILED with a bounded condition report."
           (list (list :function function
                       :name name
                       :payload payload
+                      :owner-identifiers owner-identifiers
+                      :root-identifier root-identifier
                       :maximum-runtime-milliseconds
                       maximum-runtime-milliseconds)))))
 
