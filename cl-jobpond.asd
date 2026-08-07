@@ -11,5 +11,6 @@
                              (:file "conditions")
                              (:file "pool")
                              (:file "inspection")
-                             (:file "publication"))))
+                             (:file "publication")
+                             (:file "cancellation"))))
   :in-order-to ((asdf:test-op (asdf:test-op #:cl-jobpond/tests))))
