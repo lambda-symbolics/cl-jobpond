@@ -95,9 +95,17 @@
 
 (defpackage #:cl-jobpond/tests
   (:use #:cl)
+  (:import-from #:bordeaux-threads
+                #:all-threads
+                #:condition-notify
+                #:condition-wait
+                #:make-condition-variable
+                #:make-lock
+                #:thread-name
+                #:with-lock-held)
   (:import-from #:cl-jobpond
-                #:*monitor-poll-seconds*
-                #:*shutdown-timeout-seconds*
+                #:*progress-output-limit*
+                #:*retained-progress-output-limit*
                 #:job-aborted
                 #:job-aborted-reason
                 #:job-await
@@ -106,18 +114,28 @@
                 #:job-cancellation-requested-p
                 #:job-check-cancellation
                 #:job-condition-report
+                #:job-deadline
                 #:job-identifier
                 #:job-index
+                #:job-maximum-runtime-milliseconds
+                #:job-name
+                #:job-not-found
+                #:job-not-found-identifier
                 #:job-payload
                 #:job-pool-active-count
                 #:job-pool-add-listener
                 #:job-pool-capacity-exceeded
+                #:job-pool-capacity-exceeded-limit
                 #:job-pool-capacity-exceeded-limit-kind
+                #:job-pool-capacity-exceeded-live-count
+                #:job-pool-capacity-exceeded-requested-count
                 #:job-pool-close
                 #:job-pool-closed
                 #:job-pool-detach
                 #:job-pool-detach-refused
+                #:job-pool-detach-refused-reason
                 #:job-pool-emit
+                #:job-pool-error
                 #:job-pool-find-job
                 #:job-pool-invalid-entry
                 #:job-pool-invalid-limit
@@ -126,18 +144,19 @@
                 #:job-pool-list-jobs
                 #:job-pool-live-count
                 #:job-pool-live-jobs
+                #:job-pool-name
                 #:job-pool-queued-count
                 #:job-pool-refresh
                 #:job-pool-remove-listener
                 #:job-pool-submit
                 #:job-pool-submit-batch
                 #:job-progress-snapshot
-                #:job-not-found
                 #:job-report-progress
                 #:job-result
                 #:job-run-inline
                 #:job-run-token
                 #:job-snapshot
+                #:job-started-at
                 #:job-state
                 #:job-terminal-p
                 #:make-job-pool)

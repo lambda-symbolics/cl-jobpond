@@ -16,3 +16,15 @@
                              (:file "lifecycle")
                              (:file "admission"))))
   :in-order-to ((asdf:test-op (asdf:test-op #:cl-jobpond/tests))))
+
+(asdf:defsystem #:cl-jobpond/tests
+  :description "Tests for cl-jobpond"
+  :depends-on (#:cl-jobpond)
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "package")
+                             (:file "tests"))))
+  :perform (asdf:test-op (operation component)
+             (declare (ignore operation component))
+             (uiop:symbol-call '#:cl-jobpond/tests '#:run-tests)))
