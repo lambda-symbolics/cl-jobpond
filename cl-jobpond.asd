@@ -8,5 +8,6 @@
   :components ((:module "source"
                 :serial t
                 :components ((:file "package")
-                             (:file "conditions"))))
+                             (:file "conditions")
+                             (:file "pool"))))
   :in-order-to ((asdf:test-op (asdf:test-op #:cl-jobpond/tests))))
