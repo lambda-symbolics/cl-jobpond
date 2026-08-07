@@ -132,14 +132,21 @@ this direction, so the monitor cannot deadlock against terminal publication."
        (maximum-live-jobs *default-maximum-live-jobs*)
        (maximum-runtime-milliseconds *default-maximum-runtime-milliseconds*)
        (terminal-retention-limit *default-terminal-retention-limit*)
-       (job-class 'job))
-  "Create an open job pool with its reusable workers already running.
+       (job-class 'job)
+       (start-threads-p t))
+  "Create an open job pool and return it.
 
 MAXIMUM-CONCURRENCY workers start immediately, so a pool costs its threads from
-creation rather than from first use. MAXIMUM-RUNTIME-MILLISECONDS is the default
-wall-clock cap applied to every admitted job, where zero disables deadlines.
-Every limit is validated, so a bad bound signals JOB-POOL-INVALID-LIMIT here
-instead of misbehaving later. Always pair this with JOB-POOL-CLOSE.
+creation rather than from first use. Pass START-THREADS-P NIL for a pool that
+costs nothing until its first admission: submission starts the threads it needs
+anyway, so a host whose sessions mostly never submit a job pays only for the ones
+that do. It also keeps such a host single threaded, which matters to anything that
+forks or saves its own image.
+
+MAXIMUM-RUNTIME-MILLISECONDS is the default wall-clock cap applied to every
+admitted job, where zero disables deadlines. Every limit is validated, so a bad
+bound signals JOB-POOL-INVALID-LIMIT here instead of misbehaving later. Always
+pair this with JOB-POOL-CLOSE.
 
 JOB-CLASS names the class this pool instantiates for each job, and must be JOB
 or a subclass of it. A host with fields of its own subclasses JOB and passes
@@ -172,8 +179,9 @@ real accessors instead of inside the payload."
                :terminal-retention-limit
                (job-pool--validate-limit :terminal-retention-limit
                                          terminal-retention-limit))))
-    (job-pool--ensure-workers pool)
-    (job-pool--ensure-monitor pool)
+    (when start-threads-p
+      (job-pool--ensure-workers pool)
+      (job-pool--ensure-monitor pool))
     pool))
 
 

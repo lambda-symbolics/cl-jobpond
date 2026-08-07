@@ -1314,6 +1314,27 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
         (tests--gate-open release))))
   nil)
 
+(defun tests--deferred-threads ()
+  "Exercise a pool that starts no threads until its first admission."
+  (let ((before (length (all-threads))))
+    (with-test-pool (pool :name "cl-jobpond test deferred"
+                          :maximum-concurrency 3
+                          :maximum-runtime-milliseconds 1000
+                          :start-threads-p nil)
+      (test-assert (= (length (all-threads)) before)
+                   "a deferred pool starts no thread of its own")
+      (test-assert (eq (job-pool-lifecycle-state pool) :open)
+                   "a deferred pool is open before it has any thread")
+      (let ((job (job-pool-submit pool
+                                  (lambda (job) (declare (ignore job)) :ran)
+                                  :name "first")))
+        (tests--await-completed job)
+        (test-assert (eq (job-result job) :ran)
+                     "the first admission starts the workers it needs")
+        (test-assert (> (length (all-threads)) before)
+                     "a deferred pool has threads once it has been used"))))
+  nil)
+
 (defun run-tests ()
   "Run every cl-jobpond regression test."
   (setf *test-count* 0)
@@ -1337,6 +1358,7 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
   (tests--retention-ring)
   (tests--inline-execution)
   (tests--inline-only-admission)
+  (tests--deferred-threads)
   (tests--close-and-reopen)
   (tests--detach-refusal)
   (tests--no-leaked-threads)

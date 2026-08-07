@@ -60,8 +60,11 @@ work with =job-pool-capacity-exceeded= rather than letting a queue grow without
 limit.
 
 A pool starts one worker thread per unit of its concurrency bound at
-construction, so a pool costs its threads from the moment it exists. Close it
-with =job-pool-close= when it is no longer needed.
+construction, so a pool costs its threads from the moment it exists. Pass
+=:start-threads-p nil= for a pool that starts them on its first admission
+instead, which is what a host wants when most of its sessions never submit a job,
+or when it must stay single threaded until it does. Close a pool with
+=job-pool-close= when it is no longer needed.
 
 * Progress
 
