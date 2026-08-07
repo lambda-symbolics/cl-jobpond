@@ -382,13 +382,14 @@ pool bound it supplied badly."
            (or (null maximum) (<= value maximum)))
       value
       (error 'job-pool-invalid-limit
-             :message (if maximum
-                          (format nil
-                                  "The ~(~A~) limit must be an integer between ~D and ~D, not ~S."
-                                  limit-kind minimum maximum value)
-                          (format nil
-                                  "The ~(~A~) limit must be an integer of at least ~D, not ~S."
-                                  limit-kind minimum value))
+             :message
+             (if maximum
+                 (format nil
+                         "The ~(~A~) limit must be an integer from ~D to ~D, not ~S."
+                         limit-kind minimum maximum value)
+                 (format nil
+                         "The ~(~A~) limit must be at least ~D, not ~S."
+                         limit-kind minimum value))
              :limit-kind limit-kind
              :value value)))
 

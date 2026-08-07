@@ -10,5 +10,6 @@
                 :components ((:file "package")
                              (:file "conditions")
                              (:file "pool")
-                             (:file "inspection"))))
+                             (:file "inspection")
+                             (:file "publication"))))
   :in-order-to ((asdf:test-op (asdf:test-op #:cl-jobpond/tests))))
