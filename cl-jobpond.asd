@@ -13,5 +13,6 @@
                              (:file "inspection")
                              (:file "publication")
                              (:file "cancellation")
-                             (:file "lifecycle"))))
+                             (:file "lifecycle")
+                             (:file "admission"))))
   :in-order-to ((asdf:test-op (asdf:test-op #:cl-jobpond/tests))))
