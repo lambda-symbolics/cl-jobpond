@@ -79,7 +79,8 @@ regularly never needs an interrupt to stop."
         (job--append-progress-output progress output))
       (incf (job-progress--step-count progress) steps)
       (setf (job-progress--updated-at progress) (get-internal-real-time)
-            event (list :identifier (job-identifier job)
+            event (list :job job
+                        :identifier (job-identifier job)
                         :index (job-index job)
                         :status (job-progress--state progress)
                         :step-count (job-progress--step-count progress)

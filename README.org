@@ -115,14 +115,39 @@ shutdown can all race for the same job, and exactly one of them installs the
 terminal result. A job cancelled just as it finished publishes =:aborted= with no
 result rather than reporting a success nobody wanted.
 
+A host that wants to own what a terminal job *carries* supplies
+=:terminal-result-function=. It is called with the job, the resolved state, the
+result being published, and the report, and returns its own result, report, and
+state:
+
+#+BEGIN_SRC lisp
+(lambda (job state result report)
+  (values (list :status state :value result :error report)
+          report
+          state))
+#+END_SRC
+
+The hook runs inside the publication claim and outside the job's lifecycle lock,
+so exactly one writer ever runs it and it may take locks or do input and output.
+That is what makes it the right place for work whose side effects must not be
+duplicated, such as writing a result artifact named after the job. It runs on
+every publication path, including a job cancelled before it ever started, so a
+host never has to reconstruct a record the pool published without it. A state it
+returns is honoured only when that state is itself terminal, so a hook cannot
+revive a job.
+
 * Listeners
 
 =job-pool-add-listener= registers a function of a channel keyword and an event
 plist. The pool emits =:job-lifecycle= events with the statuses =:started=,
 =:completed=, =:failed=, and =:aborted=, and =:job-progress= events for each
-report. A listener that signals is ignored, so an observer can never turn a job
-into a pool failure. Listeners run on the thread that produced the event, so they
-must not block.
+report. Every event carries the job it is about as =:job=, because a listener
+wanting more than the status has to reach the job for it, and looking one up by
+identifier would fail exactly when retention has already evicted it.
+
+A listener that signals is ignored, so an observer can never turn a job into a
+pool failure. Listeners run on the thread that produced the event, so they must
+not block.
 
 * Shutdown
 

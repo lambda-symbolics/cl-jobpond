@@ -30,11 +30,58 @@ this nesting cannot deadlock against admission or the worker loop."
 ;;;; -- Lifecycle Events --
 
 (defun job--lifecycle-event (job status)
-  "Return JOB's portable lifecycle event plist for STATUS."
-  (list :identifier (job-identifier job)
+  "Return JOB's lifecycle event plist for STATUS.
+
+The job itself is carried on the event. A listener that wants more than the
+status has to reach the job for it, and looking one up by identifier would fail
+exactly when terminal retention has already evicted it."
+  (list :job job
+        :identifier (job-identifier job)
         :index (job-index job)
         :name (job-name job)
         :status status))
+
+
+;;;; -- Host Terminal Records --
+
+(defun job--resolve-terminal-record (job state result report)
+  "Return JOB's terminal record for STATE as (values result report state).
+
+The library owns the publication claim and the state machine; a host that needs
+to own what a terminal job *carries* supplies :TERMINAL-RESULT-FUNCTION. The hook
+is called with the job, the resolved state, the result being published, and the
+report, and returns its own result, report, and state.
+
+It runs inside the claim and outside JOB's lifecycle lock, so exactly one writer
+ever runs it and it may take locks or do input and output. That is what makes it
+the right place for work whose side effects must not be duplicated, such as
+writing a result artifact named after the job.
+
+A returned state replaces the resolved one only when it is itself terminal, so a
+hook cannot revive a job by answering :RUNNING."
+  (let ((hook (job-terminal-result-function job)))
+    (if hook
+        (multiple-value-bind (hook-result hook-report hook-state)
+            (funcall hook job state result report)
+          (values hook-result
+                  hook-report
+                  (if (job--terminal-state-p hook-state) hook-state state)))
+        (values result report state))))
+
+(defun job--force-terminal-record (job state report)
+  "Return the host terminal record for a forced failure, or NIL when it fails.
+
+The forced path must not be able to fail, so the hook runs inside a handler that
+discards every condition, and its state and report answers are ignored: this path
+has already decided both. A host whose hook fails here loses the detail of the
+record, never the terminal state."
+  (let ((hook (job-terminal-result-function job)))
+    (if hook
+        (handler-case
+            (values (funcall hook job state nil report))
+          (serious-condition ()
+            nil))
+        nil)))
 
 
 ;;;; -- Terminal Publication --
@@ -55,7 +102,10 @@ never leave a half-published terminal state behind.
 
 A cancellation reason recorded before the claim downgrades REQUESTED-STATE to
 :ABORTED and discards RESULT, so a job cancelled just as it finished never
-reports success."
+reports success.
+
+The job's :TERMINAL-RESULT-FUNCTION, when it has one, then decides what the
+terminal record actually contains. See JOB--RESOLVE-TERMINAL-RECORD."
   (let ((*terminal-publication-job* job)
         (publish-p nil)
         (state requested-state)
@@ -80,6 +130,8 @@ reports success."
                     (or final-report
                         (format nil "Job ~A was ~(~A~) as it finished."
                                 (job-identifier job) reason))))
+            (multiple-value-setq (final-result final-report state)
+              (job--resolve-terminal-record job state final-result final-report))
             (setf final-report
                   (if final-report
                       (jobpond--bounded-string final-report)
@@ -117,13 +169,14 @@ terminal, so a lost broadcast cannot strand them."
            (jobpond--bounded-string
             (format nil "Job failure: ~A; publication failure: ~A"
                     execution-condition publication-condition)))
+         (result (job--force-terminal-record job state report))
          (event nil))
     (with-lock-held ((job--lock job))
       (unless (job--terminal-state-p (job-state job))
         (job--compact-progress job state)
         (setf (job-state job) state
               (job--publication-claimed-p job) nil
-              (job-result job) nil
+              (job-result job) result
               (job-condition-report job) report
               (job-ended-at job) (get-internal-real-time)
               (job--thread job) nil

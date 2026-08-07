@@ -195,7 +195,7 @@
     :initform nil
     :accessor job-pool--listeners
     :type list
-    :documentation "Callbacks receiving portable lifecycle and progress events."))
+    :documentation "Callbacks receiving lifecycle and progress events."))
   (:documentation "A bounded pool of reusable workers running supervised jobs."))
 
 (defclass job ()
@@ -243,6 +243,11 @@
     :reader job-maximum-runtime-milliseconds
     :type (integer 0)
     :documentation "The wall-clock cap for this job, or zero when disabled.")
+   (terminal-result-function
+    :initarg :terminal-result-function
+    :reader job-terminal-result-function
+    :type (or null function)
+    :documentation "The host hook shaping this job's terminal record, or NIL.")
    (lock
     :initform (make-lock "cl-jobpond job")
     :reader job--lock
@@ -412,10 +417,11 @@ pool bound it supplied badly."
 ;;;; -- Listeners and Events --
 
 (defun job-pool-add-listener (pool listener)
-  "Register LISTENER for POOL's portable events and return it.
+  "Register LISTENER for POOL's events and return it.
 
-LISTENER is called with a channel keyword and an event plist. It runs on the
-thread that produced the event, so it must not block or signal."
+LISTENER is called with a channel keyword and an event plist whose :JOB is the
+job the event is about. It runs on the thread that produced the event, so it must
+not block or signal."
   (check-type listener function)
   (with-lock-held ((job-pool--lock pool))
     (pushnew listener (job-pool--listeners pool) :test #'eq))

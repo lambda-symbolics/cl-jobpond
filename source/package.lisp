@@ -57,13 +57,8 @@
            #:job-pool-closed
            #:job-pool-closed-lifecycle-state
            #:job-pool-descendant-jobs
-           #:job-pool-job-class
            #:job-pool-detach
-           #:job-pool-descendant-jobs
-           #:job-pool-job-class
            #:job-pool-detach-refused
-           #:job-pool-descendant-jobs
-           #:job-pool-job-class
            #:job-pool-detach-refused-reason
            #:job-pool-emit
            #:job-pool-error
@@ -74,6 +69,7 @@
            #:job-pool-invalid-limit
            #:job-pool-invalid-limit-kind
            #:job-pool-invalid-limit-value
+           #:job-pool-job-class
            #:job-pool-lifecycle-state
            #:job-pool-list-jobs
            #:job-pool-live-count
@@ -99,6 +95,7 @@
            #:job-started-at
            #:job-state
            #:job-terminal-p
+           #:job-terminal-result-function
            #:make-job-pool))
 
 (defpackage #:cl-jobpond/tests
@@ -130,7 +127,7 @@
                 #:job-not-found
                 #:job-not-found-identifier
                 #:job-owner-identifiers
-           #:job-payload
+                #:job-payload
                 #:job-pool-active-count
                 #:job-pool-add-listener
                 #:job-pool-capacity-exceeded
@@ -141,20 +138,16 @@
                 #:job-pool-close
                 #:job-pool-closed
                 #:job-pool-descendant-jobs
-           #:job-pool-job-class
-           #:job-pool-detach
-                #:job-pool-descendant-jobs
-           #:job-pool-job-class
-           #:job-pool-detach-refused
-                #:job-pool-descendant-jobs
-           #:job-pool-job-class
-           #:job-pool-detach-refused-reason
+                #:job-pool-detach
+                #:job-pool-detach-refused
+                #:job-pool-detach-refused-reason
                 #:job-pool-emit
                 #:job-pool-error
                 #:job-pool-find-job
                 #:job-pool-invalid-entry
                 #:job-pool-invalid-limit
                 #:job-pool-invalid-limit-kind
+                #:job-pool-job-class
                 #:job-pool-lifecycle-state
                 #:job-pool-list-jobs
                 #:job-pool-live-count
@@ -168,12 +161,13 @@
                 #:job-progress-snapshot
                 #:job-report-progress
                 #:job-result
-           #:job-root-identifier
+                #:job-root-identifier
                 #:job-run-inline
                 #:job-run-token
                 #:job-snapshot
                 #:job-started-at
                 #:job-state
                 #:job-terminal-p
+                #:job-terminal-result-function
                 #:make-job-pool)
   (:export #:run-tests))

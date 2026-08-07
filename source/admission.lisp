@@ -52,6 +52,15 @@
              :entry entry))
     (copy-list initargs)))
 
+(defun job-pool--entry-terminal-result-function (entry)
+  "Return ENTRY's terminal result hook, or NIL when it supplies none."
+  (let ((function (getf entry :terminal-result-function)))
+    (unless (or (null function) (functionp function))
+      (error 'job-pool-invalid-entry
+             :message ":TERMINAL-RESULT-FUNCTION must be a function or NIL."
+             :entry entry))
+    function))
+
 (defun job-pool--entry-name (entry)
   "Return ENTRY's descriptive name or signal JOB-POOL-INVALID-ENTRY."
   (let ((name (and (listp entry) (getf entry :name))))
@@ -83,6 +92,7 @@ reserving names and terminal retention can evict a job without freeing a name."
            :owner-identifiers (getf entry :owner-identifiers)
            :root-identifier (getf entry :root-identifier)
            :body-function (getf entry :function)
+           :terminal-result-function (getf entry :terminal-result-function)
            :maximum-runtime-milliseconds
            (getf entry :maximum-runtime-milliseconds)
            (getf entry :initargs))))
@@ -102,6 +112,9 @@ slots.
 cancellation possible: a job is a descendant of every identifier in its owner
 list, so one pass over the pool finds a whole subtree.
 
+:TERMINAL-RESULT-FUNCTION lets the host decide what the job's terminal record
+contains. See JOB--PUBLISH-TERMINAL for when it runs and what it returns.
+
 Admission is all or nothing. Entries are validated and normalized before the pool
 lock is taken, and the batch-size and live-job bounds are checked under that same
 lock as the jobs enter the queue, so a refused batch admits nothing and a batch
@@ -118,6 +131,8 @@ or JOB-POOL-CLOSED and leaves the pool untouched."
                            :root-identifier
                            (job-pool--entry-root-identifier entry)
                            :initargs (job-pool--entry-initargs entry)
+                           :terminal-result-function
+                           (job-pool--entry-terminal-result-function entry)
                            :maximum-runtime-milliseconds
                            (job-pool--entry-runtime pool entry)))
                    entries))
@@ -166,6 +181,7 @@ or JOB-POOL-CLOSED and leaves the pool untouched."
 
 (defun job-pool-submit (pool function &key name payload owner-identifiers
                                         root-identifier
+                                        terminal-result-function
                                         maximum-runtime-milliseconds)
   "Admit one job running FUNCTION into POOL and return the job.
 
@@ -179,6 +195,7 @@ signalling any other error publishes :FAILED with a bounded condition report."
                       :payload payload
                       :owner-identifiers owner-identifiers
                       :root-identifier root-identifier
+                      :terminal-result-function terminal-result-function
                       :maximum-runtime-milliseconds
                       maximum-runtime-milliseconds)))))
 

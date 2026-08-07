@@ -1132,6 +1132,133 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
                    "a refused ancestry entry admits nothing")))
   nil)
 
+(defun tests--terminal-result-hook ()
+  "Exercise the host hook that decides what a terminal job carries."
+  (with-test-pool (pool :name "cl-jobpond test terminal records")
+    (let* ((lock (make-lock "cl-jobpond test hook"))
+           (calls nil)
+           (record (lambda (job state result report)
+                     (with-lock-held (lock)
+                       (push (list (job-identifier job) state result report)
+                             calls))
+                     (list :shaped state :from result))))
+      (let ((job (job-pool-submit pool
+                                  (lambda (job)
+                                    (declare (ignore job))
+                                    :body-value)
+                                  :name "shaped"
+                                  :terminal-result-function record)))
+        (tests--await-completed job)
+        (test-assert (equal (job-result job)
+                            '(:shaped :completed :from :body-value))
+                     "the hook result becomes the published result")
+        (test-assert (= (length calls) 1)
+                     "the hook runs exactly once for one job")
+        (test-assert (null (fourth (first calls)))
+                     "a completing job gives the hook no report"))
+      (setf calls nil)
+      (let ((job (job-pool-submit pool
+                                  (lambda (job)
+                                    (declare (ignore job))
+                                    (error "body refused"))
+                                  :name "failed"
+                                  :terminal-result-function record)))
+        (tests--await-completed job)
+        (test-assert (eq (job-state job) :failed)
+                     "a failing body still publishes :FAILED with a hook")
+        (test-assert (eq (second (first calls)) :failed)
+                     "the hook is told the resolved terminal state")
+        (test-assert (and (stringp (fourth (first calls)))
+                          (search "body refused" (fourth (first calls))))
+                     "the hook receives the condition report")
+        (test-assert (null (third (first calls)))
+                     "a failing body gives the hook no result")))
+    (let ((job (job-pool-submit
+                pool
+                (lambda (job) (declare (ignore job)) :body-value)
+                :name "restated"
+                :terminal-result-function
+                (lambda (job state result report)
+                  (declare (ignore job state result report))
+                  (values :restated "restated report" :failed)))))
+      (tests--await-completed job)
+      (test-assert (eq (job-state job) :failed)
+                   "the hook may restate the terminal state")
+      (test-assert (eq (job-result job) :restated)
+                   "a restated publication keeps the hook result")
+      (test-assert (string= (job-condition-report job) "restated report")
+                   "a restated publication keeps the hook report"))
+    (let ((job (job-pool-submit
+                pool
+                (lambda (job) (declare (ignore job)) :body-value)
+                :name "revived"
+                :terminal-result-function
+                (lambda (job state result report)
+                  (declare (ignore job state result report))
+                  (values :revived nil :running)))))
+      (tests--await-completed job)
+      (test-assert (eq (job-state job) :completed)
+                   "the hook cannot revive a job with a non-terminal state"))
+    (let ((job (job-pool-submit
+                pool
+                (lambda (job) (declare (ignore job)) :body-value)
+                :name "rude-hook"
+                :terminal-result-function
+                (lambda (job state result report)
+                  (declare (ignore job state result report))
+                  (error "hook refused")))))
+      (tests--await-completed job)
+      (test-assert (eq (job-state job) :failed)
+                   "a hook that signals still leaves the job terminal")
+      (test-assert (null (job-result job))
+                   "a hook that signals twice yields no record")
+      (test-assert (search "hook refused" (job-condition-report job))
+                   "a forced failure reports the hook condition")))
+  (let ((release (tests--make-gate))
+        (started (tests--make-gate)))
+    (with-test-pool (pool :name "cl-jobpond test cancelled records"
+                          :maximum-concurrency 1)
+      (let ((blocker (job-pool-submit pool
+                                      (lambda (job)
+                                        (declare (ignore job))
+                                        (tests--gate-open started)
+                                        (tests--gate-await release))
+                                      :name "blocker"))
+            (queued (job-pool-submit
+                     pool
+                     (lambda (job) (declare (ignore job)) :never-runs)
+                     :name "queued"
+                     :terminal-result-function
+                     (lambda (job state result report)
+                       (declare (ignore job result))
+                       (list :cancelled state :report report)))))
+        (test-assert (tests--gate-await started)
+                     "the blocking job occupies the only worker")
+        (test-assert (tests--wait-until
+                      (lambda () (= (job-pool-queued-count pool) 1)))
+                     "the second job is queued before cancellation")
+        (job-cancel queued :reason :superseded)
+        (tests--await-completed queued)
+        (test-assert (eq (job-state queued) :aborted)
+                     "a queued job cancelled before it starts is aborted")
+        (test-assert (eq (second (job-result queued)) :aborted)
+                     "the hook shapes a record for a job that never ran")
+        (test-assert (search "superseded" (getf (job-result queued) :report))
+                     "the hook receives the pre-start cancellation report")
+        (tests--gate-open release)
+        (tests--await-completed blocker))))
+  (with-test-pool (pool :name "cl-jobpond test hook validation")
+    (test-assert
+     (signals job-pool-invalid-entry
+       (job-pool-submit-batch
+        pool
+        (list (list :function #'identity
+                    :terminal-result-function :not-a-function))))
+     "a terminal result hook that is not a function is refused")
+    (test-assert (zerop (job-pool-live-count pool))
+                 "a refused hook entry admits nothing"))
+  nil)
+
 (defun run-tests ()
   "Run every cl-jobpond regression test."
   (setf *test-count* 0)
@@ -1146,6 +1273,7 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
   (tests--queued-cancellation)
   (tests--cooperative-cancellation)
   (tests--late-completion-downgrade)
+  (tests--terminal-result-hook)
   (tests--pool-deadline)
   (tests--job-deadline)
   (tests--await-timeout)
