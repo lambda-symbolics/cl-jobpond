@@ -1,0 +1,151 @@
+#+TITLE: cl-jobpond
+#+STARTUP: content
+
+=cl-jobpond= runs caller-supplied job bodies on a bounded pool of reusable
+threads. Every job is supervised: it publishes exactly one terminal result, it
+can be cancelled safely while it runs, it can carry a wall-clock deadline, and it
+reports progress to listeners along the way.
+
+#+BEGIN_SRC lisp
+(let ((pool (cl-jobpond:make-job-pool :maximum-concurrency 4)))
+  (unwind-protect
+       (let ((job (cl-jobpond:job-pool-submit
+                   pool
+                   (lambda (job)
+                     (* 2 (cl-jobpond:job-payload job)))
+                   :name "double"
+                   :payload 21)))
+         (getf (cl-jobpond:job-await job) :result))
+    (cl-jobpond:job-pool-close pool)))
+;; => 42
+#+END_SRC
+
+The pool knows nothing about what a job does. It owns admission, concurrency,
+lifecycle, cancellation, and retention; the body owns the work.
+
+* Jobs
+
+A job body is a function of one argument, the job itself. Its outcome is typed:
+
+- returning a value publishes =:completed= with that value as the result,
+- signalling =job-aborted= publishes =:aborted=,
+- signalling any other error publishes =:failed= with a bounded condition report.
+
+A body that escapes even those paths, for instance by signalling a
+=serious-condition= that is not an error, is caught by the worker backstop and
+published as =:failed=. A job that has been admitted always becomes terminal.
+
+=job-snapshot= returns a coherent plist of state, result, cancellation reason,
+condition report, timings, and progress. Reading the individual accessors is
+cheaper but can mix values from either side of a transition, so prefer the
+snapshot when several fields must agree.
+
+* Admission
+
+=job-pool-submit= admits one job. =job-pool-submit-batch= admits a list of entry
+plists atomically: either every entry is queued, or none is and the pool is
+untouched.
+
+#+BEGIN_SRC lisp
+(cl-jobpond:job-pool-submit-batch
+ pool
+ (list (list :function #'summarize :payload report-a :name "report-a")
+       (list :function #'summarize :payload report-b :name "report-b")))
+#+END_SRC
+
+Three bounds are enforced. =:maximum-concurrency= limits jobs running at the same
+time, =:maximum-batch-size= limits one atomic admission, and
+=:maximum-live-jobs= limits queued and running jobs together. The last two refuse
+work with =job-pool-capacity-exceeded= rather than letting a queue grow without
+limit.
+
+A pool starts one worker thread per unit of its concurrency bound at
+construction, so a pool costs its threads from the moment it exists. Close it
+with =job-pool-close= when it is no longer needed.
+
+* Progress
+
+A body calls =job-report-progress= to publish a progress value, append to a
+bounded output tail, and advance a step count. =job-progress-snapshot= reads the
+result from any thread.
+
+#+BEGIN_SRC lisp
+(cl-jobpond:job-report-progress job :detail '(:stage :parsing) :output line)
+#+END_SRC
+
+Every progress report is also a cancellation point: it signals =job-aborted= when
+a controller asked for cancellation. A body that reports progress regularly
+therefore stops cleanly without ever being interrupted.
+
+* Cancellation
+
+=job-cancel= is first-writer. The first accepted request records its reason;
+later requests return =nil=. A queued job leaves the queue and publishes
+=:aborted= immediately. A running job is interrupted on its worker thread.
+
+An interrupt is prepared on the controller's thread and delivered later, by which
+time the worker may have finished the target job and started a different one. Each
+execution therefore carries a unique run token, and the interrupt only unwinds
+when the worker still reports the same job, the same token, and is not in the
+middle of publishing its terminal result. That guard is what stops a late
+interrupt from killing an unrelated job that merely inherited the worker.
+
+Interrupts are best effort. A body blocked where the host cannot deliver them
+stops at its next =job-check-cancellation= or =job-report-progress= call instead.
+=job-aborted= is a =serious-condition= rather than an =error=, so a body that
+handles =error= broadly cannot accidentally swallow its own cancellation.
+
+* Deadlines
+
+A positive =:maximum-runtime-milliseconds= gives every job of the pool a
+wall-clock cap, and an individual entry may override it. A single monitor thread
+cancels expired jobs with the reason =:timeout=. Zero disables deadlines, and a
+pool that can never have one runs no monitor thread at all.
+
+* Terminal results
+
+Terminal jobs stay available for inspection through =job-pool-find-job= and
+=job-pool-list-jobs=, bounded by =:terminal-retention-limit=. Once the ring is
+full the oldest terminal job is evicted, and looking it up afterwards signals
+=job-not-found=. The evicted job object itself remains valid for anyone still
+holding it.
+
+Publication is single-writer. A body returning normally, a deadline, and pool
+shutdown can all race for the same job, and exactly one of them installs the
+terminal result. A job cancelled just as it finished publishes =:aborted= with no
+result rather than reporting a success nobody wanted.
+
+* Listeners
+
+=job-pool-add-listener= registers a function of a channel keyword and an event
+plist. The pool emits =:job-lifecycle= events with the statuses =:started=,
+=:completed=, =:failed=, and =:aborted=, and =:job-progress= events for each
+report. A listener that signals is ignored, so an observer can never turn a job
+into a pool failure. Listeners run on the thread that produced the event, so they
+must not block.
+
+* Shutdown
+
+=job-pool-close= cancels every admitted job, stops every thread, and returns
+=t= only when the pool reached =:closed=. It is graceful in that every job
+becomes terminal and every waiter is woken, but it is not a drain: a running job
+is stopped rather than finished. Wait for the jobs that matter with =job-await=
+first.
+
+Closing is idempotent and safe from several threads at once; one caller becomes
+the close owner and the others wait for its result. =job-pool-detach= then drops
+the runtime state of a closed pool, and =job-pool-refresh= reopens it with fresh
+workers.
+
+* Tests
+
+#+BEGIN_SRC lisp
+(asdf:test-system :cl-jobpond)
+#+END_SRC
+
+* License
+
+Licensed under =COLL-Attribution=. See =LICENSE.lisp= for the authoritative
+terms.
+
+Part of the [[https://www.lambda-symbolics.com/libraries][Lambda Symbolics library shelf]].
