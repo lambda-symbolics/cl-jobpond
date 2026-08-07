@@ -1076,6 +1076,8 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
                      "a job with no ancestors records none")
         (test-assert (tests--gate-await started)
                      "the root job started")
+        (test-assert (tests--wait-until (lambda () (job-terminal-p stranger)))
+                     "an unrelated job runs to completion")
         (test-assert (eq (job-state stranger) :completed)
                      "an unrelated job is unaffected by the subtree")
         (let ((descendants (job-pool-descendant-jobs pool root-identifier)))

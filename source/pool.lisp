@@ -128,6 +128,11 @@
     :accessor job-pool-maximum-runtime-milliseconds
     :type (integer 0)
     :documentation "The default wall-clock cap for one job, or zero when off.")
+   (job-class
+    :initarg :job-class
+    :reader job-pool-job-class
+    :type symbol
+    :documentation "The class this pool instantiates for each admitted job.")
    (terminal-retention-limit
     :initarg :terminal-retention-limit
     :accessor job-pool-terminal-retention-limit

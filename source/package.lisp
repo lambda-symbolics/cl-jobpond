@@ -57,10 +57,13 @@
            #:job-pool-closed
            #:job-pool-closed-lifecycle-state
            #:job-pool-descendant-jobs
+           #:job-pool-job-class
            #:job-pool-detach
            #:job-pool-descendant-jobs
+           #:job-pool-job-class
            #:job-pool-detach-refused
            #:job-pool-descendant-jobs
+           #:job-pool-job-class
            #:job-pool-detach-refused-reason
            #:job-pool-emit
            #:job-pool-error
@@ -138,10 +141,13 @@
                 #:job-pool-close
                 #:job-pool-closed
                 #:job-pool-descendant-jobs
+           #:job-pool-job-class
            #:job-pool-detach
                 #:job-pool-descendant-jobs
+           #:job-pool-job-class
            #:job-pool-detach-refused
                 #:job-pool-descendant-jobs
+           #:job-pool-job-class
            #:job-pool-detach-refused-reason
                 #:job-pool-emit
                 #:job-pool-error

@@ -148,6 +148,14 @@ adding to the subtree before the subtree is walked; a descendant admitted after
 the walk is not reached, so a caller needing a guaranteed empty subtree cancels
 and then re-checks.
 
+* Host fields
+
+A host with fields of its own subclasses =job= and gives the pool
+=:job-class=; each admission entry then carries =:initargs= for that class. That
+keeps host fields in real slots with real accessors rather than inside
+=:payload=, which is what a host wants once it has more than a value or two to
+carry.
+
 * Tests
 
 #+BEGIN_SRC lisp

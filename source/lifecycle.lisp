@@ -131,18 +131,32 @@ this direction, so the monitor cannot deadlock against terminal publication."
        (maximum-batch-size *default-maximum-batch-size*)
        (maximum-live-jobs *default-maximum-live-jobs*)
        (maximum-runtime-milliseconds *default-maximum-runtime-milliseconds*)
-       (terminal-retention-limit *default-terminal-retention-limit*))
+       (terminal-retention-limit *default-terminal-retention-limit*)
+       (job-class 'job))
   "Create an open job pool with its reusable workers already running.
 
 MAXIMUM-CONCURRENCY workers start immediately, so a pool costs its threads from
 creation rather than from first use. MAXIMUM-RUNTIME-MILLISECONDS is the default
 wall-clock cap applied to every admitted job, where zero disables deadlines.
 Every limit is validated, so a bad bound signals JOB-POOL-INVALID-LIMIT here
-instead of misbehaving later. Always pair this with JOB-POOL-CLOSE."
+instead of misbehaving later. Always pair this with JOB-POOL-CLOSE.
+
+JOB-CLASS names the class this pool instantiates for each job, and must be JOB
+or a subclass of it. A host with fields of its own subclasses JOB and passes
+:INITARGS in each admission entry, which keeps those fields in real slots with
+real accessors instead of inside the payload."
   (check-type name string)
+  (unless (and (symbolp job-class)
+               (find-class job-class nil)
+               (subtypep job-class 'job))
+    (error 'job-pool-invalid-limit
+           :message ":JOB-CLASS must name JOB or a subclass of it."
+           :limit-kind :job-class
+           :value job-class))
   (let ((pool (make-instance
                'job-pool
                :name name
+               :job-class job-class
                :maximum-concurrency
                (job-pool--validate-limit :maximum-concurrency
                                          maximum-concurrency

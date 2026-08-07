@@ -43,6 +43,15 @@
              :entry entry))
     root))
 
+(defun job-pool--entry-initargs (entry)
+  "Return ENTRY's validated extra initialization arguments for the job class."
+  (let ((initargs (getf entry :initargs)))
+    (unless (and (listp initargs) (evenp (length initargs)))
+      (error 'job-pool-invalid-entry
+             :message ":INITARGS must be a plist of initialization arguments."
+             :entry entry))
+    (copy-list initargs)))
+
 (defun job-pool--entry-name (entry)
   "Return ENTRY's descriptive name or signal JOB-POOL-INVALID-ENTRY."
   (let ((name (and (listp entry) (getf entry :name))))
@@ -64,17 +73,19 @@ reserving names and terminal retention can evict a job without freeing a name."
   (let* ((index (job-pool--next-index pool))
          (name (getf entry :name))
          (fragment (or (jobpond--identifier-fragment name) "job")))
-    (make-instance 'job
-                   :pool pool
-                   :identifier (format nil "~A-~D" fragment index)
-                   :index index
-                   :name name
-                   :payload (getf entry :payload)
-                   :owner-identifiers (getf entry :owner-identifiers)
-                   :root-identifier (getf entry :root-identifier)
-                   :body-function (getf entry :function)
-                   :maximum-runtime-milliseconds
-                   (getf entry :maximum-runtime-milliseconds))))
+    (apply #'make-instance
+           (job-pool-job-class pool)
+           :pool pool
+           :identifier (format nil "~A-~D" fragment index)
+           :index index
+           :name name
+           :payload (getf entry :payload)
+           :owner-identifiers (getf entry :owner-identifiers)
+           :root-identifier (getf entry :root-identifier)
+           :body-function (getf entry :function)
+           :maximum-runtime-milliseconds
+           (getf entry :maximum-runtime-milliseconds)
+           (getf entry :initargs))))
 
 (defun job-pool-submit-batch (pool entries)
   "Admit every entry of ENTRIES into POOL atomically and return the new jobs.
@@ -82,7 +93,9 @@ reserving names and terminal retention can evict a job without freeing a name."
 Each entry is a plist. :FUNCTION is required and is called with the job as its
 only argument. :NAME gives the job a readable identifier fragment, :PAYLOAD is
 carried on the job for the body to read, and :MAXIMUM-RUNTIME-MILLISECONDS
-overrides the pool wall-clock cap for that job alone.
+overrides the pool wall-clock cap for that job alone. :INITARGS is a plist passed
+on to the pool's job class, which is how a host subclassing JOB fills its own
+slots.
 
 :OWNER-IDENTIFIERS names this job's ancestors, outermost first, and
 :ROOT-IDENTIFIER names the tree it belongs to. Both are what makes a cascading
@@ -104,6 +117,7 @@ or JOB-POOL-CLOSED and leaves the pool untouched."
                            (job-pool--entry-owner-identifiers entry)
                            :root-identifier
                            (job-pool--entry-root-identifier entry)
+                           :initargs (job-pool--entry-initargs entry)
                            :maximum-runtime-milliseconds
                            (job-pool--entry-runtime pool entry)))
                    entries))
