@@ -173,6 +173,15 @@ adding to the subtree before the subtree is walked; a descendant admitted after
 the walk is not reached, so a caller needing a guaranteed empty subtree cancels
 and then re-checks.
 
+* Running a job on a chosen thread
+
+=job-run-inline= runs a queued job on the calling thread, which is what keeps a
+pool from deadlocking when every worker is blocked waiting on another job. A
+queued job can always be claimed by an idle worker first, though, so a host that
+*must* have a particular thread admits the job with =:inline-only-p=. Such a job
+is never queued: it counts against the live bound and is findable and cancellable
+like any other, but only =job-run-inline= will ever run it.
+
 * Host fields
 
 A host with fields of its own subclasses =job= and gives the pool

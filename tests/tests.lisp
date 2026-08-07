@@ -1262,6 +1262,58 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
                  "a refused hook entry admits nothing"))
   nil)
 
+(defun tests--inline-only-admission ()
+  "Exercise a job admitted without being queued for any worker."
+  (with-test-pool (pool :name "cl-jobpond test inline only"
+                        :maximum-concurrency 4)
+    (let* ((ran-on nil)
+           (job (job-pool-submit pool
+                                 (lambda (job)
+                                   (declare (ignore job))
+                                   (setf ran-on (thread-name (current-thread)))
+                                   :inline-value)
+                                 :name "inline-only"
+                                 :inline-only-p t)))
+      (test-assert (job-inline-only-p job)
+                   "an unqueued job reports that only inline running can run it")
+      (test-assert (zerop (job-pool-queued-count pool))
+                   "an unqueued job never enters the pool queue")
+      (test-assert (= (job-pool-live-count pool) 1)
+                   "an unqueued job still counts against the live bound")
+      (test-assert (eq (job-pool-find-job pool (job-identifier job)) job)
+                   "an unqueued job is still findable")
+      (test-assert (not (tests--wait-until
+                         (lambda () (job-terminal-p job))
+                         :timeout-seconds 0.25))
+                   "no worker picks up an unqueued job")
+      (test-assert (job-run-inline job)
+                   "an inline runner claims an unqueued job")
+      (test-assert (eq (job-state job) :completed)
+                   "an inline unqueued job publishes its result")
+      (test-assert (eq (job-result job) :inline-value)
+                   "an inline unqueued job keeps the value its body returned")
+      (test-assert (string= ran-on (thread-name (current-thread)))
+                   "an unqueued job runs on the thread that claimed it")
+      (test-assert (not (job-run-inline job))
+                   "a second inline runner is told it did not claim the job")))
+  (let ((release (tests--make-gate)))
+    (with-test-pool (pool :name "cl-jobpond test inline only cancel"
+                          :maximum-concurrency 2)
+      (let ((job (job-pool-submit pool
+                                  (lambda (job)
+                                    (declare (ignore job))
+                                    (tests--gate-await release))
+                                  :name "inline-cancel"
+                                  :inline-only-p t)))
+        (test-assert (job-cancel job :reason :discarded)
+                     "an unqueued job accepts cancellation")
+        (test-assert (eq (job-state job) :aborted)
+                     "a cancelled unqueued job publishes as aborted")
+        (test-assert (not (job-run-inline job))
+                     "a cancelled unqueued job cannot be claimed")
+        (tests--gate-open release))))
+  nil)
+
 (defun run-tests ()
   "Run every cl-jobpond regression test."
   (setf *test-count* 0)
@@ -1284,6 +1336,7 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
   (tests--listeners)
   (tests--retention-ring)
   (tests--inline-execution)
+  (tests--inline-only-admission)
   (tests--close-and-reopen)
   (tests--detach-refusal)
   (tests--no-leaked-threads)

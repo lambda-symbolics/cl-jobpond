@@ -248,6 +248,16 @@
     :reader job-terminal-result-function
     :type (or null function)
     :documentation "The host hook shaping this job's terminal record, or NIL.")
+   (inline-only-p
+    :initarg :inline-only-p
+    :reader job-inline-only-p
+    :type boolean
+    :documentation "True when only JOB-RUN-INLINE may ever run this job.")
+   (inline-claimed-p
+    :initform nil
+    :accessor job--inline-claimed-p
+    :type boolean
+    :documentation "True once an inline runner has claimed this unqueued job.")
    (lock
     :initform (make-lock "cl-jobpond job")
     :reader job--lock

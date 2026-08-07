@@ -39,6 +39,7 @@
            #:job-ended-at
            #:job-identifier
            #:job-index
+           #:job-inline-only-p
            #:job-maximum-runtime-milliseconds
            #:job-name
            #:job-not-found
@@ -104,6 +105,7 @@
                 #:all-threads
                 #:condition-notify
                 #:condition-wait
+                #:current-thread
                 #:make-condition-variable
                 #:make-lock
                 #:thread-name
@@ -122,6 +124,7 @@
                 #:job-deadline
                 #:job-identifier
                 #:job-index
+                #:job-inline-only-p
                 #:job-maximum-runtime-milliseconds
                 #:job-name
                 #:job-not-found

@@ -61,6 +61,10 @@
              :entry entry))
     function))
 
+(defun job-pool--entry-inline-only-p (entry)
+  "Return true when ENTRY asks to be admitted without being queued."
+  (if (getf entry :inline-only-p) t nil))
+
 (defun job-pool--entry-name (entry)
   "Return ENTRY's descriptive name or signal JOB-POOL-INVALID-ENTRY."
   (let ((name (and (listp entry) (getf entry :name))))
@@ -93,6 +97,7 @@ reserving names and terminal retention can evict a job without freeing a name."
            :root-identifier (getf entry :root-identifier)
            :body-function (getf entry :function)
            :terminal-result-function (getf entry :terminal-result-function)
+           :inline-only-p (getf entry :inline-only-p)
            :maximum-runtime-milliseconds
            (getf entry :maximum-runtime-milliseconds)
            (getf entry :initargs))))
@@ -115,10 +120,17 @@ list, so one pass over the pool finds a whole subtree.
 :TERMINAL-RESULT-FUNCTION lets the host decide what the job's terminal record
 contains. See JOB--PUBLISH-TERMINAL for when it runs and what it returns.
 
+:INLINE-ONLY-P admits a job without queueing it, so no worker will ever pick it
+up and only JOB-RUN-INLINE can run it. A host that must run a job on one
+particular thread needs this: a queued job can always be claimed by an idle worker
+first, and the host would lose the thread it cared about. Such a job still counts
+against the live bound and is still findable and cancellable, so admitting one and
+never running it leaves it queued until the pool closes.
+
 Admission is all or nothing. Entries are validated and normalized before the pool
 lock is taken, and the batch-size and live-job bounds are checked under that same
 lock as the jobs enter the queue, so a refused batch admits nothing and a batch
-that returns has every job queued. A refusal signals JOB-POOL-CAPACITY-EXCEEDED
+that returns has every job admitted. A refusal signals JOB-POOL-CAPACITY-EXCEEDED
 or JOB-POOL-CLOSED and leaves the pool untouched."
   (check-type entries list)
   (let* ((normalized
@@ -133,6 +145,8 @@ or JOB-POOL-CLOSED and leaves the pool untouched."
                            :initargs (job-pool--entry-initargs entry)
                            :terminal-result-function
                            (job-pool--entry-terminal-result-function entry)
+                           :inline-only-p
+                           (job-pool--entry-inline-only-p entry)
                            :maximum-runtime-milliseconds
                            (job-pool--entry-runtime pool entry)))
                    entries))
@@ -170,7 +184,8 @@ or JOB-POOL-CLOSED and leaves the pool untouched."
                            (job-pool--create-job-locked pool entry))
                          normalized)
             (job-pool--queue pool)
-            (nconc (job-pool--queue pool) (copy-list jobs)))
+            (nconc (job-pool--queue pool)
+                   (remove-if #'job-inline-only-p jobs)))
       (dolist (job jobs)
         (setf (gethash (job-identifier job) (job-pool--jobs pool)) job))
       (incf (job-pool--live-count pool) count)
@@ -182,6 +197,7 @@ or JOB-POOL-CLOSED and leaves the pool untouched."
 (defun job-pool-submit (pool function &key name payload owner-identifiers
                                         root-identifier
                                         terminal-result-function
+                                        inline-only-p
                                         maximum-runtime-milliseconds)
   "Admit one job running FUNCTION into POOL and return the job.
 
@@ -196,6 +212,7 @@ signalling any other error publishes :FAILED with a bounded condition report."
                       :owner-identifiers owner-identifiers
                       :root-identifier root-identifier
                       :terminal-result-function terminal-result-function
+                      :inline-only-p inline-only-p
                       :maximum-runtime-milliseconds
                       maximum-runtime-milliseconds)))))
 
@@ -209,20 +226,29 @@ A caller that is about to block waiting for JOB can run it here instead, which
 keeps a pool from deadlocking when every worker is occupied by a job waiting on
 another job. The claim removes JOB from the pool queue under the pool lock, so a
 reusable worker and an inline runner never run the same job twice. Return NIL
-when JOB was already claimed, cancelled, or started."
+when JOB was already claimed, cancelled, or started.
+
+A job admitted with :INLINE-ONLY-P was never queued, so nothing can race this
+claim in the first place and it is taken with a flag on the job instead."
   (let ((pool (job-pool job))
         (claimed-p nil))
     (with-lock-held ((job--lock job))
       (when (and (eq (job-state job) :queued)
                  (null (job-cancellation-reason job))
                  (not (job--publication-claimed-p job)))
-        (with-lock-held ((job-pool--lock pool))
-          (when (member job (job-pool--queue pool) :test #'eq)
-            (setf (job-pool--queue pool)
-                  (remove job (job-pool--queue pool) :test #'eq)
-                  claimed-p t)
-            (jobpond--condition-broadcast
-             (job-pool--condition-variable pool))))))
+        (if (job-inline-only-p job)
+            ;; An unqueued job is claimed with its own flag, since there is no
+            ;; queue entry whose removal could serve as the claim.
+            (unless (job--inline-claimed-p job)
+              (setf (job--inline-claimed-p job) t
+                    claimed-p t))
+            (with-lock-held ((job-pool--lock pool))
+              (when (member job (job-pool--queue pool) :test #'eq)
+                (setf (job-pool--queue pool)
+                      (remove job (job-pool--queue pool) :test #'eq)
+                      claimed-p t)
+                (jobpond--condition-broadcast
+                 (job-pool--condition-variable pool)))))))
     (when claimed-p
       (job--execute job))
     claimed-p))
