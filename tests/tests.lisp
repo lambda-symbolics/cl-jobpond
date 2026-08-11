@@ -70,6 +70,22 @@ notification only costs latency and never hangs a test."
         (return nil))
       (sleep 0.002))))
 
+(defun tests--pool-limits (pool)
+  "Return POOL's mutable policy limits in publication order."
+  (list (job-pool-maximum-concurrency pool)
+        (job-pool-maximum-batch-size pool)
+        (job-pool-maximum-live-jobs pool)
+        (job-pool-maximum-runtime-milliseconds pool)))
+
+(defun tests--pool-thread-count (pool-name)
+  "Return the live threads whose names belong to POOL-NAME."
+  (count-if (lambda (thread)
+              (let ((name (thread-name thread)))
+                (and name
+                     (<= (length pool-name) (length name))
+                     (string= pool-name name :end2 (length pool-name)))))
+            (all-threads)))
+
 (defclass tests--counter ()
   ((lock
     :initform (make-lock "cl-jobpond test counter")
@@ -432,6 +448,231 @@ abnormal exit still closes the pool, but leaves the original failure visible."
       (test-assert (eq (job-pool-invalid-limit-kind refusal) (first case))
                    (format nil "the refusal of ~S names its limit"
                            (first case)))))
+  nil)
+
+
+;;;; -- Pool Policy Updates --
+
+(defparameter *tests--invalid-policy-update-cases*
+  '((:maximum-concurrency 0)
+    (:maximum-batch-size 0)
+    (:maximum-live-jobs 0)
+    (:maximum-runtime-milliseconds -1))
+  "Mutable pool limits paired with a value an atomic update must refuse.")
+
+(defun tests--blocking-counter-body (counter gate)
+  "Return a job body that records its occupancy while waiting on GATE."
+  (lambda (job)
+    (declare (ignore job))
+    (tests--counter-enter counter)
+    (unwind-protect
+         (tests--gate-await gate)
+      (tests--counter-leave counter))))
+
+(defun tests--policy-default-runtime-boundary ()
+  "Force an update between entry normalization and locked admission."
+  (with-test-pool (pool :name "cl-jobpond test policy admission boundary"
+                        :maximum-concurrency 1
+                        :maximum-runtime-milliseconds 0
+                        :start-threads-p nil)
+    (let* ((normalized (tests--make-gate))
+           (continue   (tests--make-gate))
+           (symbol     'cl-jobpond::job-pool--entry-runtime-override)
+           (original   (symbol-function symbol))
+           (job        nil)
+           (condition  nil)
+           (thread     nil)
+           (joined-p   nil))
+      (unwind-protect
+           (progn
+             (setf (symbol-function symbol)
+                   (lambda (entry)
+                     (let ((override (funcall original entry)))
+                       (tests--gate-open normalized)
+                       (unless (tests--gate-await continue)
+                         (error "Timed out delaying entry runtime normalization."))
+                       override)))
+             (setf thread
+                   (make-thread
+                    (lambda ()
+                      (handler-case
+                          (setf job
+                                (job-pool-submit
+                                 pool
+                                 (lambda (job)
+                                   (declare (ignore job))
+                                   :ran)
+                                 :name "policy-boundary"))
+                        (condition (submission-condition)
+                          (setf condition submission-condition))))
+                    :name "cl-jobpond policy boundary submitter"))
+             (test-assert (tests--gate-await normalized)
+                          "submission normalizes before the policy update")
+             (job-pool-update-limits
+              pool
+              :maximum-concurrency 1
+              :maximum-batch-size 1
+              :maximum-live-jobs 1
+              :maximum-runtime-milliseconds 1000)
+             (tests--gate-open continue)
+             (join-thread thread)
+             (setf joined-p t)
+             (test-assert (null condition)
+                          "the delayed admission succeeds after the update")
+             (test-assert (= (job-maximum-runtime-milliseconds job) 1000)
+                          "locked admission uses the updated default runtime")
+             (tests--await-completed job))
+        (setf (symbol-function symbol) original)
+        (tests--gate-open continue)
+        (when (and thread (not joined-p))
+          (join-thread thread)))))
+  nil)
+
+(defun tests--pool-limit-updates ()
+  "Exercise atomic policy publication and immediate worker capacity changes."
+  (tests--policy-default-runtime-boundary)
+  (with-test-pool (pool :name "cl-jobpond test policy validation"
+                        :maximum-concurrency 1
+                        :maximum-batch-size 2
+                        :maximum-live-jobs 3
+                        :start-threads-p nil)
+    (let ((before (tests--pool-limits pool)))
+      (dolist (case *tests--invalid-policy-update-cases*)
+        (let* ((arguments
+                 (list :maximum-concurrency 2
+                       :maximum-batch-size 4
+                       :maximum-live-jobs 5
+                       :maximum-runtime-milliseconds 1000))
+               (refusal
+                 (progn
+                   (setf (getf arguments (first case)) (second case))
+                   (handler-case
+                       (progn (apply #'job-pool-update-limits pool arguments)
+                              nil)
+                     (job-pool-invalid-limit (condition) condition)))))
+          (test-assert refusal
+                       (format nil "an atomic update refuses ~S for ~S"
+                               (second case) (first case)))
+          (test-assert (eq (job-pool-invalid-limit-kind refusal) (first case))
+                       (format nil "the update refusal names ~S" (first case)))
+          (test-assert (equal (tests--pool-limits pool) before)
+                       (format nil "refusing ~S leaves every limit unchanged"
+                               (first case)))))
+      (let ((refusal
+              (handler-case
+                  (progn
+                    (job-pool-update-limits
+                     pool
+                     :maximum-concurrency 2
+                     :maximum-batch-size 4
+                     :maximum-live-jobs 5)
+                    nil)
+                (job-pool-invalid-limit (condition) condition))))
+        (test-assert
+         (and refusal
+              (eq (job-pool-invalid-limit-kind refusal)
+                  :maximum-runtime-milliseconds))
+         "an update requires all four mutable limits")
+        (test-assert (equal (tests--pool-limits pool) before)
+                     "an incomplete update leaves every limit unchanged"))
+      (test-assert
+       (eq (job-pool-update-limits
+            pool
+            :maximum-concurrency 2
+            :maximum-batch-size 4
+            :maximum-live-jobs 5
+            :maximum-runtime-milliseconds 1000)
+           pool)
+       "a valid policy update returns its pool")
+      (test-assert (equal (tests--pool-limits pool) '(2 4 5 1000))
+                   "a valid update publishes all four limits")))
+  (let ((name "cl-jobpond test policy deferred"))
+    (with-test-pool (pool :name name
+                          :maximum-concurrency 1
+                          :start-threads-p nil)
+      (test-assert (zerop (tests--pool-thread-count name))
+                   "a deferred policy test begins without runtime threads")
+      (job-pool-update-limits
+       pool
+       :maximum-concurrency 3
+       :maximum-batch-size 3
+       :maximum-live-jobs 3
+       :maximum-runtime-milliseconds 1000)
+      (test-assert
+       (tests--wait-until (lambda () (= (tests--pool-thread-count name) 4)))
+       "raising a deferred policy starts three workers and its deadline monitor")))
+  (with-test-pool (pool :name "cl-jobpond test policy decrease"
+                        :maximum-concurrency 3
+                        :maximum-batch-size 3
+                        :maximum-live-jobs 3)
+    (let ((counter (make-instance 'tests--counter))
+          (release (tests--make-gate)))
+      (job-pool-update-limits
+       pool
+       :maximum-concurrency 1
+       :maximum-batch-size 3
+       :maximum-live-jobs 3
+       :maximum-runtime-milliseconds 0)
+      (let ((jobs
+              (job-pool-submit-batch
+               pool
+               (loop repeat 3
+                     collect (list :function
+                                   (tests--blocking-counter-body counter release))))))
+        (test-assert
+         (tests--wait-until (lambda () (= (job-pool-active-count pool) 1)))
+         "one job starts after lowering a three-worker pool to one")
+        (sleep 0.1)
+        (test-assert (= (tests--counter-maximum counter) 1)
+                     "excess workers cannot claim beyond a lowered bound")
+        (tests--gate-open release)
+        (dolist (job jobs)
+          (tests--await-completed job)))))
+  (with-test-pool (pool :name "cl-jobpond test policy increase"
+                        :maximum-concurrency 1
+                        :maximum-batch-size 3
+                        :maximum-live-jobs 3)
+    (let ((counter (make-instance 'tests--counter))
+          (release (tests--make-gate)))
+      (let ((jobs
+              (job-pool-submit-batch
+               pool
+               (loop repeat 3
+                     collect (list :function
+                                   (tests--blocking-counter-body counter release))))))
+        (test-assert
+         (tests--wait-until (lambda () (= (job-pool-active-count pool) 1)))
+         "one job starts before raising the concurrency bound")
+        (job-pool-update-limits
+         pool
+         :maximum-concurrency 3
+         :maximum-batch-size 3
+         :maximum-live-jobs 3
+         :maximum-runtime-milliseconds 0)
+        (test-assert
+         (tests--wait-until (lambda () (= (tests--counter-maximum counter) 3)))
+         "raising concurrency wakes queued work onto the new workers")
+        (tests--gate-open release)
+        (dolist (job jobs)
+          (tests--await-completed job)))))
+  (let ((pool (make-job-pool :name "cl-jobpond test closed policy"
+                             :maximum-concurrency 1
+                             :start-threads-p nil)))
+    (unwind-protect
+         (progn
+           (test-assert (job-pool-close pool)
+                        "the policy persistence test closes its pool")
+           (job-pool-update-limits
+            pool
+            :maximum-concurrency 2
+            :maximum-batch-size 3
+            :maximum-live-jobs 4
+            :maximum-runtime-milliseconds 1000)
+           (test-assert (equal (tests--pool-limits pool) '(2 3 4 1000))
+                        "a closed pool records its next runtime policy")
+           (test-assert (eq (job-pool-refresh pool) pool)
+                        "a closed pool refreshes with the recorded policy"))
+      (job-pool-close pool)))
   nil)
 
 
@@ -1343,6 +1584,7 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
   (tests--concurrency-bound)
   (tests--admission-bounds)
   (tests--invalid-limits)
+  (tests--pool-limit-updates)
   (tests--interrupt-guard)
   (tests--ancestry-cascade)
   (tests--running-cancellation)

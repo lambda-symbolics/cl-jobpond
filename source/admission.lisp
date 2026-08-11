@@ -11,15 +11,18 @@
                :message "A submission entry needs a :FUNCTION of one argument."
                :entry entry))))
 
-(defun job-pool--entry-runtime (pool entry)
-  "Return the wall-clock cap ENTRY requests, defaulting to POOL's own cap."
+(defun job-pool--entry-runtime-override (entry)
+  "Return ENTRY's validated wall-clock cap override, or NIL for the pool default.
+
+The pool default is resolved later under the admission lock, so a concurrent
+policy update and admission agree on one complete policy boundary."
   (let ((requested (and (listp entry)
                         (getf entry :maximum-runtime-milliseconds))))
     (if requested
         (job-pool--validate-limit :maximum-runtime-milliseconds
                                   requested
                                   :minimum 0)
-        (job-pool-maximum-runtime-milliseconds pool))))
+        nil)))
 
 (defun job-pool--entry-owner-identifiers (entry)
   "Return ENTRY's validated ancestor identifiers, outermost first."
@@ -99,7 +102,8 @@ reserving names and terminal retention can evict a job without freeing a name."
            :terminal-result-function (getf entry :terminal-result-function)
            :inline-only-p (getf entry :inline-only-p)
            :maximum-runtime-milliseconds
-           (getf entry :maximum-runtime-milliseconds)
+           (or (getf entry :maximum-runtime-milliseconds)
+               (job-pool-maximum-runtime-milliseconds pool))
            (getf entry :initargs))))
 
 (defun job-pool-submit-batch (pool entries)
@@ -127,11 +131,12 @@ first, and the host would lose the thread it cared about. Such a job still count
 against the live bound and is still findable and cancellable, so admitting one and
 never running it leaves it queued until the pool closes.
 
-Admission is all or nothing. Entries are validated and normalized before the pool
-lock is taken, and the batch-size and live-job bounds are checked under that same
-lock as the jobs enter the queue, so a refused batch admits nothing and a batch
-that returns has every job admitted. A refusal signals JOB-POOL-CAPACITY-EXCEEDED
-or JOB-POOL-CLOSED and leaves the pool untouched."
+Admission is all or nothing. Entries and explicit runtime overrides are validated
+and normalized before the pool lock is taken. An omitted runtime is resolved from
+the pool policy under the same lock that checks batch-size and live-job bounds and
+publishes the jobs, so a concurrent policy update and admission agree on one
+boundary. A refused batch admits nothing and signals JOB-POOL-CAPACITY-EXCEEDED or
+JOB-POOL-CLOSED without changing the pool."
   (check-type entries list)
   (let* ((normalized
            (mapcar (lambda (entry)
@@ -148,7 +153,7 @@ or JOB-POOL-CLOSED and leaves the pool untouched."
                            :inline-only-p
                            (job-pool--entry-inline-only-p entry)
                            :maximum-runtime-milliseconds
-                           (job-pool--entry-runtime pool entry)))
+                           (job-pool--entry-runtime-override entry)))
                    entries))
          (count (length normalized))
          (jobs nil))

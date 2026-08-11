@@ -66,6 +66,26 @@ instead, which is what a host wants when most of its sessions never submit a job
 or when it must stay single threaded until it does. Close a pool with
 =job-pool-close= when it is no longer needed.
 
+=job-pool-update-limits= replaces the concurrency, batch-size, live-job, and
+default-runtime limits under the pool lock. Every value is required and validated
+before any policy changes, and admission and worker claims cannot observe a
+partial tuple. The individual limit accessors are unsynchronized inspection and
+do not form an atomic snapshot during a concurrent update. An open pool starts
+newly required workers and its deadline monitor immediately, and wakes workers
+already waiting on queued work. Lowering concurrency leaves extra reusable
+threads alive, but the claim path prevents them from starting work beyond the new
+bound. Updating a closed or closing pool records the policy used by its next
+=job-pool-refresh=.
+
+#+BEGIN_SRC lisp
+(cl-jobpond:job-pool-update-limits
+ pool
+ :maximum-concurrency 2
+ :maximum-batch-size 4
+ :maximum-live-jobs 8
+ :maximum-runtime-milliseconds 30000)
+#+END_SRC
+
 * Progress
 
 A body calls =job-report-progress= to publish a progress value, append to a

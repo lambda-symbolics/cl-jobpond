@@ -48,22 +48,31 @@ failure, and a condition escaping that publication forces a terminal failure."
           (jobpond--condition-broadcast
            (job-pool--condition-variable pool)))))))
 
+(defun job-pool--ensure-workers-locked (pool)
+  "Start enough reusable workers for POOL while its lock is held.
+
+Dead workers are forgotten first. Lowering the concurrency bound leaves excess
+workers alive and sleeping, because the worker claim path enforces the new bound
+without interrupting a job or retiring a reusable thread in place."
+  (setf (job-pool--worker-threads pool)
+        (remove-if-not #'thread-alive-p (job-pool--worker-threads pool)))
+  (when (eq (job-pool-lifecycle-state pool) :open)
+    (loop repeat (max 0
+                      (- (job-pool-maximum-concurrency pool)
+                         (length (job-pool--worker-threads pool))))
+          for index from (length (job-pool--worker-threads pool))
+          do (push (make-thread
+                    (lambda () (job-pool--worker-loop pool))
+                    :name (format nil "~A worker ~D"
+                                  (job-pool-name pool) (1+ index)))
+                   (job-pool--worker-threads pool))))
+  nil)
+
 (defun job-pool--ensure-workers (pool)
   "Start reusable workers until POOL has one per unit of its concurrency bound."
   (with-lock-held ((job-pool--lock pool))
-    (setf (job-pool--worker-threads pool)
-          (remove-if-not #'thread-alive-p (job-pool--worker-threads pool)))
-    (when (eq (job-pool-lifecycle-state pool) :open)
-      (loop repeat (max 0
-                        (- (job-pool-maximum-concurrency pool)
-                           (length (job-pool--worker-threads pool))))
-            for index from (length (job-pool--worker-threads pool))
-            do (push (make-thread
-                      (lambda () (job-pool--worker-loop pool))
-                      :name (format nil "~A worker ~D"
-                                    (job-pool-name pool) (1+ index)))
-                     (job-pool--worker-threads pool)))
-      (jobpond--condition-broadcast (job-pool--condition-variable pool))))
+    (job-pool--ensure-workers-locked pool)
+    (jobpond--condition-broadcast (job-pool--condition-variable pool)))
   nil)
 
 
@@ -108,18 +117,23 @@ this direction, so the monitor cannot deadlock against terminal publication."
                           (job-pool--lock pool)
                           :timeout *monitor-poll-seconds*))))))
 
+(defun job-pool--ensure-monitor-locked (pool)
+  "Start POOL's deadline monitor when needed while its lock is held."
+  (let ((monitor (job-pool--monitor-thread pool)))
+    (when (and (job-pool--deadlines-possible-locked-p pool)
+               (eq (job-pool-lifecycle-state pool) :open)
+               (not (and monitor (thread-alive-p monitor))))
+      (setf (job-pool--monitor-thread pool)
+            (make-thread
+             (lambda () (job-pool--monitor-loop pool))
+             :name (format nil "~A deadline monitor"
+                           (job-pool-name pool))))))
+  nil)
+
 (defun job-pool--ensure-monitor (pool)
   "Start POOL's single deadline monitor when some job can carry a deadline."
   (with-lock-held ((job-pool--lock pool))
-    (let ((monitor (job-pool--monitor-thread pool)))
-      (when (and (job-pool--deadlines-possible-locked-p pool)
-                 (eq (job-pool-lifecycle-state pool) :open)
-                 (not (and monitor (thread-alive-p monitor))))
-        (setf (job-pool--monitor-thread pool)
-              (make-thread
-               (lambda () (job-pool--monitor-loop pool))
-               :name (format nil "~A deadline monitor"
-                             (job-pool-name pool)))))))
+    (job-pool--ensure-monitor-locked pool))
   nil)
 
 
@@ -183,6 +197,49 @@ real accessors instead of inside the payload."
       (job-pool--ensure-workers pool)
       (job-pool--ensure-monitor pool))
     pool))
+
+
+;;;; -- Pool Policy Updates --
+
+(defun job-pool-update-limits
+    (pool &key maximum-concurrency maximum-batch-size maximum-live-jobs
+               maximum-runtime-milliseconds)
+  "Atomically replace POOL's mutable limits and return POOL.
+
+Every keyword is required. All four values are validated before the pool lock is
+taken, so JOB-POOL-INVALID-LIMIT leaves the complete previous policy in place.
+The new tuple is published under one lock acquisition, so lock-mediated
+submission and worker claims cannot observe a partial policy. The individual
+limit accessors remain unsynchronized inspection and do not form an atomic
+snapshot when called concurrently with this operation. An open pool starts any
+newly required workers and deadline monitor immediately, while lowering
+concurrency leaves excess workers alive but unable to claim beyond the new bound.
+A closing or closed pool keeps the new policy for its next refresh."
+  (let ((validated-maximum-concurrency
+          (job-pool--validate-limit :maximum-concurrency
+                                    maximum-concurrency
+                                    :maximum *maximum-concurrency-limit*))
+        (validated-maximum-batch-size
+          (job-pool--validate-limit :maximum-batch-size maximum-batch-size))
+        (validated-maximum-live-jobs
+          (job-pool--validate-limit :maximum-live-jobs maximum-live-jobs))
+        (validated-maximum-runtime-milliseconds
+          (job-pool--validate-limit :maximum-runtime-milliseconds
+                                    maximum-runtime-milliseconds
+                                    :minimum 0)))
+    (with-lock-held ((job-pool--lock pool))
+      (setf (job-pool-maximum-concurrency pool)
+            validated-maximum-concurrency
+            (job-pool-maximum-batch-size pool)
+            validated-maximum-batch-size
+            (job-pool-maximum-live-jobs pool)
+            validated-maximum-live-jobs
+            (job-pool-maximum-runtime-milliseconds pool)
+            validated-maximum-runtime-milliseconds)
+      (job-pool--ensure-workers-locked pool)
+      (job-pool--ensure-monitor-locked pool)
+      (jobpond--condition-broadcast (job-pool--condition-variable pool))))
+  pool)
 
 
 ;;;; -- Pool Lifecycle --

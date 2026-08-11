@@ -86,6 +86,7 @@
            #:job-pool-submit
            #:job-pool-submit-batch
            #:job-pool-terminal-retention-limit
+           #:job-pool-update-limits
            #:job-progress-snapshot
            #:job-report-progress
            #:job-result
@@ -106,8 +107,10 @@
                 #:condition-notify
                 #:condition-wait
                 #:current-thread
+                #:join-thread
                 #:make-condition-variable
                 #:make-lock
+                #:make-thread
                 #:thread-name
                 #:with-lock-held)
   (:import-from #:cl-jobpond
@@ -155,12 +158,17 @@
                 #:job-pool-list-jobs
                 #:job-pool-live-count
                 #:job-pool-live-jobs
+                #:job-pool-maximum-batch-size
+                #:job-pool-maximum-concurrency
+                #:job-pool-maximum-live-jobs
+                #:job-pool-maximum-runtime-milliseconds
                 #:job-pool-name
                 #:job-pool-queued-count
                 #:job-pool-refresh
                 #:job-pool-remove-listener
                 #:job-pool-submit
                 #:job-pool-submit-batch
+                #:job-pool-update-limits
                 #:job-progress-snapshot
                 #:job-report-progress
                 #:job-result
