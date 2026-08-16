@@ -3,8 +3,8 @@
 
 =cl-jobpond= runs caller-supplied job bodies on a bounded pool of reusable
 threads. Every job is supervised: it publishes exactly one terminal result, it
-can be cancelled safely while it runs, it can carry a wall-clock deadline, and it
-reports progress to listeners along the way.
+can be cancelled while it runs, it can carry a wall-clock deadline, and it
+reports progress to listeners.
 
 #+BEGIN_SRC lisp
 (let ((pool (cl-jobpond:make-job-pool :maximum-concurrency 4)))
@@ -20,31 +20,28 @@ reports progress to listeners along the way.
 ;; => 42
 #+END_SRC
 
-The pool knows nothing about what a job does. It owns admission, concurrency,
-lifecycle, cancellation, and retention; the body owns the work.
+The pool owns admission, concurrency, lifecycle, cancellation, and retention.
+The body owns the work.
 
 * Jobs
 
 A job body is a function of one argument, the job itself. Its outcome is typed:
 
-- returning a value publishes =:completed= with that value as the result,
-- signalling =job-aborted= publishes =:aborted=,
-- signalling any other error publishes =:failed= with a bounded condition report.
+- returning a value publishes =:completed= with that value as the result
+- signalling =job-aborted= publishes =:aborted=
+- signalling any other error publishes =:failed= with a bounded condition report
 
-A body that escapes even those paths, for instance by signalling a
-=serious-condition= that is not an error, is caught by the worker backstop and
+A body that escapes even those paths is caught by the worker backstop and
 published as =:failed=. A job that has been admitted always becomes terminal.
 
 =job-snapshot= returns a coherent plist of state, result, cancellation reason,
-condition report, timings, and progress. Reading the individual accessors is
-cheaper but can mix values from either side of a transition, so prefer the
-snapshot when several fields must agree.
+condition report, timings, and progress. Prefer the snapshot when several
+fields must agree.
 
 * Admission
 
-=job-pool-submit= admits one job. =job-pool-submit-batch= admits a list of entry
-plists atomically: either every entry is queued, or none is and the pool is
-untouched.
+=job-pool-submit= admits one job. =job-pool-submit-batch= admits a list of
+entry plists atomically: either every entry is queued, or none is.
 
 #+BEGIN_SRC lisp
 (cl-jobpond:job-pool-submit-batch
@@ -53,29 +50,22 @@ untouched.
        (list :function #'summarize :payload report-b :name "report-b")))
 #+END_SRC
 
-Three bounds are enforced. =:maximum-concurrency= limits jobs running at the same
-time, =:maximum-batch-size= limits one atomic admission, and
-=:maximum-live-jobs= limits queued and running jobs together. The last two refuse
-work with =job-pool-capacity-exceeded= rather than letting a queue grow without
-limit.
+Three bounds are enforced:
+
+- =:maximum-concurrency= limits jobs running at the same time
+- =:maximum-batch-size= limits one atomic admission
+- =:maximum-live-jobs= limits queued and running jobs together
+
+The last two refuse work with =job-pool-capacity-exceeded=.
 
 A pool starts one worker thread per unit of its concurrency bound at
-construction, so a pool costs its threads from the moment it exists. Pass
-=:start-threads-p nil= for a pool that starts them on its first admission
-instead, which is what a host wants when most of its sessions never submit a job,
-or when it must stay single threaded until it does. Close a pool with
-=job-pool-close= when it is no longer needed.
+construction. Pass =:start-threads-p nil= for a pool that starts them on its
+first admission. Close a pool with =job-pool-close= when it is no longer
+needed.
 
 =job-pool-update-limits= replaces the concurrency, batch-size, live-job, and
-default-runtime limits under the pool lock. Every value is required and validated
-before any policy changes, and admission and worker claims cannot observe a
-partial tuple. The individual limit accessors are unsynchronized inspection and
-do not form an atomic snapshot during a concurrent update. An open pool starts
-newly required workers and its deadline monitor immediately, and wakes workers
-already waiting on queued work. Lowering concurrency leaves extra reusable
-threads alive, but the claim path prevents them from starting work beyond the new
-bound. Updating a closed or closing pool records the policy used by its next
-=job-pool-refresh=.
+default-runtime limits under the pool lock. Every value is required and
+validated before any policy changes.
 
 #+BEGIN_SRC lisp
 (cl-jobpond:job-pool-update-limits
@@ -89,16 +79,15 @@ bound. Updating a closed or closing pool records the policy used by its next
 * Progress
 
 A body calls =job-report-progress= to publish a progress value, append to a
-bounded output tail, and advance a step count. =job-progress-snapshot= reads the
-result from any thread.
+bounded output tail, and advance a step count. =job-progress-snapshot= reads
+the result from any thread.
 
 #+BEGIN_SRC lisp
 (cl-jobpond:job-report-progress job :detail '(:stage :parsing) :output line)
 #+END_SRC
 
-Every progress report is also a cancellation point: it signals =job-aborted= when
-a controller asked for cancellation. A body that reports progress regularly
-therefore stops cleanly without ever being interrupted.
+Every progress report is also a cancellation point: it signals =job-aborted=
+when a controller asked for cancellation.
 
 * Cancellation
 
@@ -106,24 +95,17 @@ therefore stops cleanly without ever being interrupted.
 later requests return =nil=. A queued job leaves the queue and publishes
 =:aborted= immediately. A running job is interrupted on its worker thread.
 
-An interrupt is prepared on the controller's thread and delivered later, by which
-time the worker may have finished the target job and started a different one. Each
-execution therefore carries a unique run token, and the interrupt only unwinds
-when the worker still reports the same job, the same token, and is not in the
-middle of publishing its terminal result. That guard is what stops a late
-interrupt from killing an unrelated job that merely inherited the worker.
-
 Interrupts are best effort. A body blocked where the host cannot deliver them
-stops at its next =job-check-cancellation= or =job-report-progress= call instead.
-=job-aborted= is a =serious-condition= rather than an =error=, so a body that
-handles =error= broadly cannot accidentally swallow its own cancellation.
+stops at its next =job-check-cancellation= or =job-report-progress= call.
+=job-aborted= is a =serious-condition=, so a body that handles =error= broadly
+lets cancellation through.
 
 * Deadlines
 
 A positive =:maximum-runtime-milliseconds= gives every job of the pool a
-wall-clock cap, and an individual entry may override it. A single monitor thread
-cancels expired jobs with the reason =:timeout=. Zero disables deadlines, and a
-pool that can never have one runs no monitor thread at all.
+wall-clock cap, and an individual entry may override it. A single monitor
+thread cancels expired jobs with the reason =:timeout=. Zero disables
+deadlines.
 
 * Terminal results
 
@@ -133,15 +115,10 @@ full the oldest terminal job is evicted, and looking it up afterwards signals
 =job-not-found=. The evicted job object itself remains valid for anyone still
 holding it.
 
-Publication is single-writer. A body returning normally, a deadline, and pool
-shutdown can all race for the same job, and exactly one of them installs the
-terminal result. A job cancelled just as it finished publishes =:aborted= with no
-result rather than reporting a success nobody wanted.
-
-A host that wants to own what a terminal job *carries* supplies
-=:terminal-result-function=. It is called with the job, the resolved state, the
-result being published, and the report, and returns its own result, report, and
-state:
+Publication is single-writer. A host that wants to own what a terminal job
+carries supplies =:terminal-result-function=. It is called with the job, the
+resolved state, the result being published, and the report, and returns its
+own result, report, and state:
 
 #+BEGIN_SRC lisp
 (lambda (job state result report)
@@ -150,68 +127,49 @@ state:
           state))
 #+END_SRC
 
-The hook runs inside the publication claim and outside the job's lifecycle lock,
-so exactly one writer ever runs it and it may take locks or do input and output.
-That is what makes it the right place for work whose side effects must not be
-duplicated, such as writing a result artifact named after the job. It runs on
-every publication path, including a job cancelled before it ever started, so a
-host never has to reconstruct a record the pool published without it. A state it
-returns is honoured only when that state is itself terminal, so a hook cannot
-revive a job.
+The hook runs inside the publication claim and outside the job's lifecycle
+lock, so exactly one writer ever runs it. It may take locks or do input and
+output.
 
 * Listeners
 
 =job-pool-add-listener= registers a function of a channel keyword and an event
-plist. The pool emits =:job-lifecycle= events with the statuses =:started=,
-=:completed=, =:failed=, and =:aborted=, and =:job-progress= events for each
-report. Every event carries the job it is about as =:job=, because a listener
-wanting more than the status has to reach the job for it, and looking one up by
-identifier would fail exactly when retention has already evicted it.
+plist. The pool emits:
 
-A listener that signals is ignored, so an observer can never turn a job into a
-pool failure. Listeners run on the thread that produced the event, so they must
-not block.
+- =:job-lifecycle= events with the statuses =:started=, =:completed=,
+  =:failed=, and =:aborted=
+- =:job-progress= events for each report
+
+Every event carries the job it is about as =:job=. A listener that signals is
+ignored. Listeners run on the thread that produced the event.
 
 * Shutdown
 
-=job-pool-close= cancels every admitted job, stops every thread, and returns
-=t= only when the pool reached =:closed=. It is graceful in that every job
-becomes terminal and every waiter is woken, but it is not a drain: a running job
-is stopped rather than finished. Wait for the jobs that matter with =job-await=
-first.
-
-Closing is idempotent and safe from several threads at once; one caller becomes
-the close owner and the others wait for its result. =job-pool-detach= then drops
-the runtime state of a closed pool, and =job-pool-refresh= reopens it with fresh
+Wait for the jobs that matter with =job-await= first. Closing is idempotent
+and safe from several threads at once. =job-pool-detach= then drops the
+runtime state of a closed pool, and =job-pool-refresh= reopens it with fresh
 workers.
 
 * Job trees
 
-A job may name its ancestors with =:owner-identifiers=, outermost first, and the
-tree it belongs to with =:root-identifier=. A job is a descendant of every
-identifier in its owner list, so =job-pool-descendant-jobs= finds a whole subtree
-in one pass however deep it is, and =job-cancel= with =:cascade-p= cancels that
-subtree and returns the descendants it took. The job itself is cancelled first, so a body that spawns children stops
-adding to the subtree before the subtree is walked; a descendant admitted after
-the walk is not reached, so a caller needing a guaranteed empty subtree cancels
-and then re-checks.
+A job may name its ancestors with =:owner-identifiers=, outermost first, and
+the tree it belongs to with =:root-identifier=. =job-pool-descendant-jobs=
+finds a whole subtree in one pass. =job-cancel= with =:cascade-p= cancels that
+subtree and returns the descendants it took. The job itself is cancelled
+first.
 
 * Running a job on a chosen thread
 
-=job-run-inline= runs a queued job on the calling thread, which is what keeps a
-pool from deadlocking when every worker is blocked waiting on another job. A
-queued job can always be claimed by an idle worker first, though, so a host that
-*must* have a particular thread admits the job with =:inline-only-p=. Such a job
-is never queued: it counts against the live bound and is findable and cancellable
-like any other, but only =job-run-inline= will ever run it.
+=job-run-inline= runs a queued job on the calling thread, which keeps a pool
+from deadlocking when every worker is blocked waiting on another job. A host
+that must have a particular thread admits the job with =:inline-only-p=. Such
+a job counts against the live bound and is findable and cancellable like any
+other, but only =job-run-inline= will ever run it.
 
 * Host fields
 
-A host with fields of its own subclasses =job= and gives the pool
-=:job-class=; each admission entry then carries =:initargs= for that class. That
-keeps host fields in real slots with real accessors rather than inside
-=:payload=, which is what a host wants once it has more than a value or two to
-carry.
+A host with fields of its own subclasses =job= and gives the pool =:job-class=;
+each admission entry then carries =:initargs= for that class.
 
 * Tests
 
