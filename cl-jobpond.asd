@@ -28,3 +28,29 @@
   :perform (asdf:test-op (operation component)
              (declare (ignore operation component))
              (uiop:symbol-call '#:cl-jobpond/tests '#:run-tests)))
+
+
+(asdf:defsystem #:cl-jobpond/durable-state
+  :description "Portable transactional state shared by optional schedules and mailboxes"
+  :depends-on (#:cl-jobpond)
+  :components ((:file "source/durable-state")))
+
+(asdf:defsystem #:cl-jobpond/schedules
+  :description "Durable time, interval and event wakeup state machine"
+  :depends-on (#:cl-jobpond/durable-state)
+  :components ((:file "source/schedules"))
+  :in-order-to ((asdf:test-op (asdf:test-op #:cl-jobpond/coordination-tests))))
+
+(asdf:defsystem #:cl-jobpond/mailboxes
+  :description "Bounded acknowledged mailboxes with stable delivery identities"
+  :depends-on (#:cl-jobpond/durable-state)
+  :components ((:file "source/mailboxes"))
+  :in-order-to ((asdf:test-op (asdf:test-op #:cl-jobpond/coordination-tests))))
+
+(asdf:defsystem #:cl-jobpond/coordination-tests
+  :description "Persistence, concurrency and failure tests for schedules and mailboxes"
+  :depends-on (#:cl-jobpond/schedules #:cl-jobpond/mailboxes)
+  :components ((:file "tests/coordination-tests"))
+  :perform (asdf:test-op (operation component)
+             (declare (ignore operation component))
+             (uiop:symbol-call '#:cl-jobpond/tests '#:run-coordination-tests)))

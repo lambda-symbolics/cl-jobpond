@@ -171,10 +171,118 @@ other, but only =job-run-inline= will ever run it.
 A host with fields of its own subclasses =job= and gives the pool =:job-class=;
 each admission entry then carries =:initargs= for that class.
 
+* Durable schedules (optional)
+
+Load =cl-jobpond/schedules=. This system supplies a locked portable state machine;
+the host supplies execution and a persistent process or event loop.
+
+#+BEGIN_SRC lisp
+(let ((scheduler (cl-jobpond:make-scheduler :store #'atomic-save)))
+  (cl-jobpond:scheduler-add scheduler :id "daily" :version "v3"
+                           :payload '(:task "summarize")
+                           :at (get-universal-time) :interval 86400
+                           :missed-policy ':latest)
+  (cl-jobpond:scheduler-wake scheduler)
+  (let ((claim (cl-jobpond:scheduler-claim scheduler :version "v3")))
+    (when claim
+      ;; Admit CLAIM's payload into the existing execution facility, then settle it.
+      (cl-jobpond:scheduler-ack scheduler :id (getf claim :id)
+                               :token (getf claim :token) :result '(:proof "done")))))
+#+END_SRC
+
+=make-scheduler= accepts =:clock= (default universal time), =:store=, =:snapshot=
+and =:capacity= (default 4096). Times use nonnegative integer clock units. IDs
+and versions are bounded strings. Registration is immutable and identical
+registration is idempotent; use a new ID when replacing a cancelled version.
+
+=scheduler-next-time= returns the earliest active deadline or NIL. Call
+=scheduler-wake :now= on a host deadline, and =scheduler-event :event :id :payload=
+for an observable event. Stable external event IDs suppress duplicates and reject
+changed payloads. Occurrence IDs include schedule ID, version and time/event ID.
+Claim with =:id= and/or =:version= to guard stale work.
+
+Missed-run policies are =:all= (every occurrence), =:latest= (coalesce to the most
+recent due occurrence), and =:skip= (omit past occurrences, emit one exactly at
+NOW). Catch-up capacity failure rolls back the entire wake operation. No terminal
+history is evicted implicitly: exhausted retention refuses admission. Capacity
+bounds each schedule/wakeup collection.
+
+Claim before external admission. =scheduler-ack :id :token :outcome :result=
+settles =:completed=, =:failed= or =:cancelled= and retains host proof. Identical
+ACK is idempotent; stale tokens or conflicting outcomes are refused. On reload,
+claimed records become =:unknown= and are never automatically reexecuted. Inspect
+them, ACK a known outcome, or explicitly authorize =scheduler-resolve :action
+:retry= with the existing token. Retry invalidates that token. =:action :unknown=
+also records uncertainty in a running host.
+
+=scheduler-cancel :id :version= prevents future/pending work. Claimed outcomes
+retain cancellation requests for host settlement. =scheduler-close= closes new
+admission and cancels pending work while permitting ACK/inspection.
+
+* Acknowledged mailboxes (optional)
+
+Load =cl-jobpond/mailboxes=. =make-mailbox= accepts =:capacity= (64),
+=:history-limit= (4096), =:clock=, =:store= and =:snapshot=. Capacity includes
+queued plus every unacknowledged delivery, including unknown recovered outcomes.
+Retained history has a separate bound and is never automatically evicted.
+
+#+BEGIN_SRC lisp
+(let* ((mailbox (cl-jobpond:make-mailbox))
+       (sent (cl-jobpond:mailbox-send mailbox :id "m1" :sender "a" :receiver "b"
+                                    :payload '(:text "ready")))
+       (delivery (cl-jobpond:mailbox-receive mailbox :receiver "b")))
+  (declare (ignore sent))
+  (cl-jobpond:mailbox-ack mailbox :id "m1" :receiver "b"
+                         :token (getf delivery :token) :result "accepted"))
+#+END_SRC
+
+SEND returns the retained message and a second value indicating an identical
+duplicate. Changed identity/payload is a conflict, including after acknowledgement.
+RECEIVE atomically claims the oldest queued message for its receiver, optionally
+restricted by =:id=. Receiver identity and the delivery token are required for ACK.
+This library records identity; hosts authorize it before invoking these operations.
+
+=mailbox-find= and =mailbox-snapshot= return isolated records. =mailbox-wait= takes
+either =:id= (wait for terminal acknowledgement/cancellation) or =:receiver= (wait
+for a queued message without claiming it), plus a real-seconds =:timeout= and
+optional =:cancelled-p=. It returns record/state, or NIL and =:timeout=,
+=:cancelled= or =:closed=. Waiters use condition notifications; only injected
+cancellation predicates require bounded periodic sampling.
+
+Reload converts deliveries to =:unknown=. =mailbox-resolve :id :receiver :token
+:action :retry= authorizes redelivery explicitly and invalidates the old token.
+=:action :unknown= records uncertainty without redelivery. =mailbox-cancel :id
+:sender= terminates queued messages; delivered messages retain their unacknowledged
+slot until settlement. =mailbox-close= closes SEND/RECEIVE and cancels queued work.
+ACK and identical SEND lookup are available after closure to resolve in-flight work.
+
+* Snapshot persistence
+
+Both optional systems share =cl-jobpond/durable-state= without additional runtime
+dependencies. =:store= is a function of one isolated complete version-one snapshot.
+It runs under the state lock before visibility and must atomically durably replace
+storage, or signal an ordinary ERROR without changing storage. It must not reenter
+the same state. Snapshots contain proper lists, strings, rational numbers, keywords,
+T and NIL. Data is copied at boundaries; cycles, opaque objects and excessive
+nesting/node/string sizes are refused. Read persisted snapshots with =*read-eval*
+bound to NIL, and construct a new state with =:snapshot= and the same store.
+
+A nonlocal escape from a store callback may follow publication. That live object
+then refuses access with =:uncertain-store=; reload the durable snapshot rather than
+repeating an effect against potentially stale state. A power loss after durable
+claim likewise recovers as UNKNOWN. Claims/ACKs give explicit at-most-once admission
+with uncertain outcomes, not a promise of exactly-once external effects.
+
+Transition failures signal =durable-state-error= with =durable-state-error-reason=
+and =durable-state-error-identity=. Expected reasons include =:capacity=,
+=:identity-conflict=, =:stale-version=, =:stale-token=, =:outcome-conflict= and
+=:closed=. Snapshot format/lifecycle validation precedes recovery and persistence.
+
 * Tests
 
 #+BEGIN_SRC lisp
 (asdf:test-system :cl-jobpond)
+(asdf:test-system :cl-jobpond/coordination-tests)
 #+END_SRC
 
 * License
