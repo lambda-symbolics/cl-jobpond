@@ -115,6 +115,7 @@ use MAILBOX-RESOLVE explicitly to retry after checking caller delivery history."
 (defun completion-subscription-refresh (subscription)
   "Reconcile terminal watches; return the count of newly queued events.
 Callbacks run outside all locks and may repeat concurrently; they must be idempotent.
+A conversion whose exact watch was retired concurrently cannot enqueue another event.
 Failed watches retain job references after pool eviction for an explicit retry.
 Enqueue order defines delivery order. Explicit calls propagate failures; listeners
 retain the failure report and wake the caller."
@@ -132,7 +133,8 @@ retain the failure report and wake the caller."
                          (eq (getf converted :state) (getf snapshot :state)))
               (durable-state--fail ':identity-conflict (rest watch)))
             (with-lock-held ((completion-subscription--lock subscription))
-              (unless (completion-subscription--closed-p subscription)
+              (when (and (not (completion-subscription--closed-p subscription))
+                         (member watch (completion-subscription--watches subscription) :test #'eq))
                 (unless (completion-subscription--send subscription event) (incf count))
                 (setf (completion-subscription--watches subscription)
                       (remove watch (completion-subscription--watches subscription)))))))))

@@ -305,6 +305,50 @@
       (cl-jobpond:completion-subscription-close subscription)
       (job-pool-close pool))))
 
+(defun completion-tests--retired-refresh ()
+  "Do not republish a retired watch from an in-flight concurrent conversion."
+  (let* ((pool (make-job-pool :maximum-concurrency 1))
+         (body-gate (tests--make-gate))
+         (conversion-entered (tests--make-gate))
+         (conversion-release (tests--make-gate))
+         (lock (make-lock "Conversion order"))
+         (conversions 0)
+         (subscription
+           (cl-jobpond:make-completion-subscription
+            :snapshot-function
+            (lambda (job snapshot)
+              (declare (ignore job))
+              (when (= 1 (with-lock-held (lock) (incf conversions)))
+                (tests--gate-open conversion-entered)
+                (tests--gate-await conversion-release))
+              snapshot))))
+    (unwind-protect
+         (let ((job (job-pool-submit pool
+                                    (lambda (job)
+                                      (declare (ignore job))
+                                      (tests--gate-await body-gate)
+                                      "completed"))))
+           (cl-jobpond:completion-subscription-watch subscription job)
+           (tests--gate-open body-gate)
+           (coordination--check (tests--gate-await conversion-entered))
+           (coordination--check (= 1 (cl-jobpond:completion-subscription-refresh subscription)))
+           (let ((record (first (cl-jobpond:completion-subscription-collect subscription))))
+             (coordination--check (equal "completed"
+                                         (getf (getf (getf record :payload) :snapshot) :result)))
+             (cl-jobpond:completion-subscription-ack subscription :id (getf record :id)
+                                                   :token (getf record :token))
+             (coordination--check
+              (= 1 (cl-jobpond:completion-subscription-forget subscription
+                                                              :ids (list (getf record :id))))))
+           (tests--gate-open conversion-release)
+           (job-pool-close pool)
+           (coordination--check (null (completion-tests--messages subscription)))
+           (coordination--check (null (cl-jobpond:completion-subscription-error subscription))))
+      (tests--gate-open body-gate)
+      (tests--gate-open conversion-release)
+      (cl-jobpond:completion-subscription-close subscription)
+      (job-pool-close pool))))
+
 (defun run-completion-tests ()
   "Run completion publication, concurrency, restore and failure checks."
   (let ((*coordination-checks* 0))
@@ -314,5 +358,6 @@
     (completion-tests--bounds)
     (completion-tests--attachment)
     (completion-tests--forget)
+    (completion-tests--retired-refresh)
     (format t "~&~D completion assertions passed.~%" *coordination-checks*))
   nil)
