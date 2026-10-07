@@ -271,6 +271,53 @@
       (setf (getf (first (getf snapshot :schedules)) :at) -1)
       (coordination--fails ':snapshot (cl-jobpond:make-scheduler :snapshot snapshot)))))
 
+(defun coordination--forget-tests ()
+  "Exercise explicit history pruning, refusal and atomic persistence."
+  (let ((persisted nil) (fail nil))
+    (let ((mailbox (cl-jobpond:make-mailbox
+                    :capacity 8 :history-limit 8
+                    :store (lambda (snapshot)
+                             (when fail (error "Injected atomic store refusal"))
+                             (setf persisted (coordination--roundtrip snapshot))))))
+      (dolist (id '("ack" "cancel" "queued" "delivered" "unknown" "keep"))
+        (cl-jobpond:mailbox-send mailbox :id id :sender "s" :receiver "r"))
+      (dolist (id '("ack" "keep"))
+        (let ((record (cl-jobpond:mailbox-receive mailbox :receiver "r" :id id)))
+          (cl-jobpond:mailbox-ack mailbox :id id :receiver "r" :token (getf record :token))))
+      (cl-jobpond:mailbox-cancel mailbox :id "cancel" :sender "s")
+      (cl-jobpond:mailbox-receive mailbox :receiver "r" :id "delivered")
+      (let ((record (cl-jobpond:mailbox-receive mailbox :receiver "r" :id "unknown")))
+        (cl-jobpond:mailbox-resolve mailbox :id "unknown" :receiver "r"
+                                  :token (getf record :token) :action ':unknown))
+      (let ((before (cl-jobpond:mailbox-snapshot mailbox)))
+        (dolist (id '("queued" "delivered" "unknown"))
+          (coordination--fails ':state (cl-jobpond:mailbox-forget mailbox :ids (list "ack" id))))
+        (coordination--fails ':not-found
+          (cl-jobpond:mailbox-forget mailbox :ids '("ack" "missing")))
+        (coordination--fails ':duplicate-identity
+          (cl-jobpond:mailbox-forget mailbox :ids '("ack" "ack")))
+        (coordination--fails ':identity (cl-jobpond:mailbox-forget mailbox :ids '("")))
+        (coordination--fails ':identity (cl-jobpond:mailbox-forget mailbox :ids '(2)))
+        (coordination--fails ':identity (cl-jobpond:mailbox-forget mailbox :ids "ack"))
+        (coordination--fails ':improper-list
+          (cl-jobpond:mailbox-forget mailbox :ids '("ack" . "cancel")))
+        (coordination--check (equal before (cl-jobpond:mailbox-snapshot mailbox)))
+        (setf fail t)
+        (coordination--check
+         (handler-case (progn (cl-jobpond:mailbox-forget mailbox :ids '("ack" "cancel")) nil)
+           (error () t)))
+        (coordination--check (equal before (cl-jobpond:mailbox-snapshot mailbox)))
+        (coordination--check (equal before persisted))
+        (setf fail nil)
+        (coordination--check (= 2 (cl-jobpond:mailbox-forget mailbox :ids '("ack" "cancel"))))
+        (coordination--check
+         (equal (remove-if (lambda (record) (member (getf record :id) '("ack" "cancel") :test #'equal))
+                           (getf before :messages))
+                (getf persisted :messages)))
+        (coordination--check (equal persisted (cl-jobpond:mailbox-snapshot mailbox)))
+        (coordination--check (= (getf before :sequence) (getf persisted :sequence)))
+        (coordination--check (= 0 (cl-jobpond:mailbox-forget mailbox :ids nil)))))))
+
 (defun run-coordination-tests ()
   "Run optional scheduling and mailbox behavioral checks."
   (let ((*coordination-checks* 0))
@@ -278,5 +325,6 @@
     (coordination--mailbox-tests)
     (coordination--concurrency-tests)
     (coordination--persistence-tests)
+    (coordination--forget-tests)
     (format t "~&cl-jobpond coordination: ~D assertions passed.~%" *coordination-checks*)
     t))

@@ -256,6 +256,15 @@ Reload converts deliveries to =:unknown=. =mailbox-resolve :id :receiver :token
 slot until settlement. =mailbox-close= closes SEND/RECEIVE and cancels queued work.
 ACK and identical SEND lookup are available after closure to resolve in-flight work.
 
+=mailbox-forget mailbox :ids ids= atomically removes exactly the caller-specified
+acknowledged/cancelled records and returns their count. Supply a proper list of
+unique stable string IDs. A missing ID (=:not-found=), unsettled queued,
+delivered or unknown record (=:state=), duplicate (=:duplicate-identity=), or
+invalid identity (=:identity=) signals =durable-state-error= and rejects the
+whole operation. Other records, delivery tokens and the sequence are preserved;
+a store refusal leaves live state unchanged. Nothing is pruned automatically.
+Retain your own durable receipts and prevent re-admission of forgotten identities.
+
 * Snapshot persistence
 
 Both optional systems share =cl-jobpond/durable-state= without additional runtime
@@ -331,6 +340,13 @@ an inspectable =completion-subscription-error= report. Persistence/projection
 failures retain bounded watches for =completion-subscription-refresh=; producer
 listeners report the failure and request a wakeup. Explicit calls propagate the
 failure. No callback failure changes the job's truthful terminal outcome.
+
+Use =completion-subscription-forget subscription :ids ids= to reclaim settled
+history after retaining durable caller receipts. It delegates to =mailbox-forget=
+without changing pending events or runtime watches. Return NIL from your identity
+callback for receipted jobs, and exclude them from explicit replay/watch. Pruning
+removes generic deduplication evidence, so receipt-based exclusion is required
+before pruning and during restart reconciliation.
 
 =:capacity= bounds queued plus unacknowledged events and unresolved runtime
 watches. =:history-limit= bounds retained deduplication identities; exhausted history

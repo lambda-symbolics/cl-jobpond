@@ -3,7 +3,8 @@
 ;;;; -- Bounded Acknowledged Mailboxes --
 
 (export '(mailbox make-mailbox mailbox-send mailbox-receive mailbox-ack mailbox-resolve
-          mailbox-cancel mailbox-close mailbox-snapshot mailbox-wait mailbox-find))
+          mailbox-cancel mailbox-close mailbox-snapshot mailbox-wait mailbox-find
+          mailbox-forget))
 
 (defclass mailbox (durable-state)
   ((waiters :initform nil :accessor mailbox--waiters
@@ -86,6 +87,31 @@ No callback may reenter the same mailbox. CLOCK returns integer time units."
 (defun mailbox-find (mailbox id)
   "Return an isolated message record for ID, or signal NOT-FOUND."
   (durable-state--copy (durable-state--record (mailbox-snapshot mailbox) :messages id)))
+
+(defun mailbox-forget (mailbox &key ids)
+  "Atomically forget exactly IDS, returning the number of removed records.
+Only acknowledged or cancelled records may be forgotten. IDS must be a proper
+list of unique stable identities; missing or unsettled records reject the entire
+transaction. The caller must retain durable deduplication receipts and prevent
+future admission of forgotten identities. No other records or tokens change."
+  (let ((ids (durable-state--copy ids))
+        (identities (make-hash-table :test 'equal)))
+    (unless (listp ids) (durable-state--fail ':identity))
+    (dolist (id ids)
+      (durable-state--identifier id)
+      (when (gethash id identities) (durable-state--fail ':duplicate-identity id))
+      (setf (gethash id identities) t))
+    (durable-state--transaction
+     mailbox
+     (lambda (data)
+       (dolist (id ids)
+         (let ((record (durable-state--record data :messages id)))
+           (unless (member (getf record :state) '(:acknowledged :cancelled))
+             (durable-state--fail ':state id))))
+       (setf (getf data :messages)
+             (remove-if (lambda (record) (gethash (getf record :id) identities))
+                        (getf data :messages)))
+       (length ids)))))
 
 (defun mailbox-send (mailbox &key id sender receiver payload)
   "Admit one message, or return its retained identical record and T for a duplicate.

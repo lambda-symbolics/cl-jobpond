@@ -255,6 +255,56 @@
       (cl-jobpond:completion-subscription-close subscription)
       (job-pool-close pool))))
 
+(defun completion-tests--forget ()
+  "Deliver beyond bounded history while preserving watches and in-flight claims."
+  (let* ((pool (make-job-pool :maximum-concurrency 1))
+         (gate (tests--make-gate))
+         (receipts (make-hash-table :test 'equal))
+         (subscription (cl-jobpond:make-completion-subscription
+                        :capacity 4 :history-limit 4
+                        :identity-function (lambda (job snapshot)
+                                             (declare (ignore snapshot))
+                                             (unless (gethash (job-identifier job) receipts)
+                                               (job-identifier job))))))
+    (unwind-protect
+         (let ((job (job-pool-submit pool (lambda (job)
+                                          (declare (ignore job))
+                                          (tests--gate-await gate) "watched"))))
+           (cl-jobpond:completion-subscription-watch subscription job)
+           (cl-jobpond:completion-subscription-replay
+            subscription (completion-tests--snapshot "retained" ':failed))
+           (let ((retained (first (cl-jobpond:completion-subscription-collect subscription))))
+             (dotimes (index 1100)
+               (let ((id (format nil "event-~D" index)))
+                 (cl-jobpond:completion-subscription-replay
+                  subscription (completion-tests--snapshot id ':completed))
+                 (let ((record (first (cl-jobpond:completion-subscription-collect subscription))))
+                   (coordination--check (equal id (getf record :id)))
+                   (setf (gethash id receipts) t)
+                   (cl-jobpond:completion-subscription-ack subscription :id id
+                                                         :token (getf record :token))
+                   (coordination--check
+                    (= 1 (cl-jobpond:completion-subscription-forget subscription :ids (list id)))))))
+             (coordination--check (equal (list retained) (completion-tests--messages subscription)))
+             (tests--gate-open gate)
+             (job-await job :timeout-seconds 10)
+             (let ((record (first (cl-jobpond:completion-subscription-collect subscription))))
+               (coordination--check (equal (job-identifier job) (getf record :id)))
+               (coordination--check (equal "watched" (getf (getf (getf record :payload) :snapshot) :result)))
+               (setf (gethash (getf record :id) receipts) t)
+               (cl-jobpond:completion-subscription-ack subscription :id (getf record :id)
+                                                     :token (getf record :token))
+               (cl-jobpond:completion-subscription-forget subscription :ids (list (getf record :id)))
+               (cl-jobpond:completion-subscription-watch subscription job)
+               (coordination--check (equal (list retained) (completion-tests--messages subscription))))
+             (cl-jobpond:completion-subscription-ack subscription :id "retained"
+                                                   :token (getf retained :token))
+             (cl-jobpond:completion-subscription-forget subscription :ids '("retained"))
+             (coordination--check (null (completion-tests--messages subscription)))))
+      (tests--gate-open gate)
+      (cl-jobpond:completion-subscription-close subscription)
+      (job-pool-close pool))))
+
 (defun run-completion-tests ()
   "Run completion publication, concurrency, restore and failure checks."
   (let ((*coordination-checks* 0))
@@ -263,5 +313,6 @@
     (completion-tests--failures)
     (completion-tests--bounds)
     (completion-tests--attachment)
+    (completion-tests--forget)
     (format t "~&~D completion assertions passed.~%" *coordination-checks*))
   nil)

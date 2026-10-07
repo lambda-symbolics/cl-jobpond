@@ -7,7 +7,8 @@
           completion-subscription-attach completion-subscription-watch
           completion-subscription-refresh completion-subscription-replay
           completion-subscription-collect completion-subscription-ack
-          completion-subscription-snapshot completion-subscription-close))
+          completion-subscription-forget completion-subscription-snapshot
+          completion-subscription-close))
 
 (defun completion-event (snapshot &key id)
   "Copy a complete portable job SNAPSHOT into a stable terminal event.
@@ -230,6 +231,13 @@ Reconcile current watches first so a failed producer callback can be retried."
   "Acknowledge ID and TOKEN after caller delivery proof is durable."
   (mailbox-ack (completion-subscription-mailbox subscription)
                :id id :receiver "completion" :token token :result result))
+
+(defun completion-subscription-forget (subscription &key ids)
+  "Forget exactly the settled IDS, returning their count; see MAILBOX-FORGET.
+Retain caller delivery receipts and ignore receipted jobs in IDENTITY-FUNCTION
+before pruning. Explicit replay/watch must likewise exclude forgotten identities.
+Pending events and runtime watches are unaffected."
+  (mailbox-forget (completion-subscription-mailbox subscription) :ids ids))
 
 (defun completion-subscription-snapshot (subscription)
   "Return persisted event and delivery state, including retained deduplication IDs.
