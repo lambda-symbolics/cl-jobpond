@@ -278,11 +278,87 @@ and =durable-state-error-identity=. Expected reasons include =:capacity=,
 =:identity-conflict=, =:stale-version=, =:stale-token=, =:outcome-conflict= and
 =:closed=. Snapshot format/lifecycle validation precedes recovery and persistence.
 
+* Completion subscriptions (optional)
+
+Load =cl-jobpond/completions=. Subscribe to terminal results without a polling
+thread, using the acknowledged mailbox for bounded storage and delivery claims.
+
+#+BEGIN_SRC lisp
+(let ((subscription
+        (cl-jobpond:make-completion-subscription
+         :store #'atomic-save
+         :identity-function (lambda (job snapshot)
+                              (declare (ignore snapshot))
+                              (my-durable-execution-id job))
+         :wakeup (lambda (subscription)
+                   (declare (ignore subscription))
+                   (signal-my-event-loop)))))
+  (unwind-protect
+       (progn
+         (cl-jobpond:completion-subscription-attach subscription pool)
+         ;; Submit jobs after attachment. Later, at the caller's safe boundary:
+         (dolist (record (cl-jobpond:completion-subscription-collect subscription :limit 16))
+           (persist-delivery-receipt (getf record :id) (getf record :payload))
+           (cl-jobpond:completion-subscription-ack
+            subscription :id (getf record :id) :token (getf record :token)
+            :result '(:receipt "durable-delivery-proof"))))
+    (cl-jobpond:completion-subscription-close subscription)))
+#+END_SRC
+
+For an individual job, use =completion-subscription-watch=, optionally with =:id=.
+Watch safely reconciles running and already terminal jobs, even terminal objects
+that the pool has evicted. Attach reconciles jobs retained by the pool and installs
+its listener before that reconciliation. Use one attachment per pool, before
+explicit watches. =:identity-function= receives the job and coherent raw snapshot;
+return a durable unique string identity, or NIL to ignore the job. Pool job counters
+are process-local, so use caller identities for persistence across pool lifetimes.
+
+A collected record has =:id=, =:token= and =:payload=. The payload event contains
+=:format= 1, =:id=, =:job-id=, =:outcome= and =:snapshot=. Outcomes are =:success=,
+=:failure=, =:cancelled= and =:unknown=. The full snapshot includes result, condition
+report, cancellation reason, lifecycle timings and progress. A caller with opaque
+results supplies =:snapshot-function= of two arguments (job and raw snapshot),
+returning the same complete snapshot shape with portable values, such as artifact
+references. Preserve the raw =:identifier= and =:state=; event IDs can differ from
+that pool-local identifier. Identity and projection callbacks run outside locks,
+may repeat concurrently, and must be idempotent. The identity callback must be
+reliable; explicit watch can recover an unidentified job after its callback fails.
+
+Wakeup callbacks run after enqueue, outside locks, on producer threads. They must
+only signal or schedule short caller work. Repeated/concurrent wakeups and a wakeup
+already in flight during close are possible. Wakeup failures retain the event and
+an inspectable =completion-subscription-error= report. Persistence/projection
+failures retain bounded watches for =completion-subscription-refresh=; producer
+listeners report the failure and request a wakeup. Explicit calls propagate the
+failure. No callback failure changes the job's truthful terminal outcome.
+
+=:capacity= bounds queued plus unacknowledged events and unresolved runtime
+watches. =:history-limit= bounds retained deduplication identities; exhausted history
+refuses new identities rather than dropping evidence. Successful enqueue order is
+delivery order; concurrent jobs have no promised wall-clock ordering. Each collect
+claims at most its limit. Caller receipts must precede acknowledgement. A failed
+collection may have persisted some claims; inspect snapshot messages to settle them.
+
+Persist =completion-subscription-snapshot= and recreate with =:snapshot= and the
+same store. The snapshot exposes =:messages= for inspection without claiming. Claims
+restored after a crash have UNKNOWN delivery state, preserving their terminal
+payload and token. Inspect the caller's receipts, then acknowledge with the old
+token or explicitly retry using =mailbox-resolve= on
+=completion-subscription-mailbox= with =:receiver "completion"= and =:action :retry=.
+Runtime watches/listeners are not serialized: persist outstanding job snapshots
+separately, then reconstruct with =completion-subscription-replay= and =:id=.
+Replay of an interrupted nonterminal job produces an UNKNOWN execution outcome;
+replay with identical identity/content is detectable and harmless. Conflicting
+content for a retained identity is refused. Closing detaches producer listeners
+and releases job references; queued/claimed events can still be collected and
+acknowledged. It does not close or cancel the underlying mailbox.
+
 * Tests
 
 #+BEGIN_SRC lisp
 (asdf:test-system :cl-jobpond)
 (asdf:test-system :cl-jobpond/coordination-tests)
+(asdf:test-system :cl-jobpond/completions)
 #+END_SRC
 
 * License

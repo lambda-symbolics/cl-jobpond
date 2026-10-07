@@ -54,3 +54,19 @@
   :perform (asdf:test-op (operation component)
              (declare (ignore operation component))
              (uiop:symbol-call '#:cl-jobpond/tests '#:run-coordination-tests)))
+
+
+(asdf:defsystem #:cl-jobpond/completions
+  :description "Durable bounded terminal subscriptions using acknowledged mailboxes"
+  :depends-on (#:cl-jobpond/mailboxes)
+  :components ((:file "source/completions"))
+  :in-order-to ((asdf:test-op (asdf:test-op #:cl-jobpond/completion-tests))))
+
+(asdf:defsystem #:cl-jobpond/completion-tests
+  :description "Completion attachment, persistence, failure and concurrency tests"
+  :depends-on (#:cl-jobpond/completions #:cl-jobpond/tests
+               #:cl-jobpond/coordination-tests)
+  :components ((:file "tests/completion-tests"))
+  :perform (asdf:test-op (operation component)
+             (declare (ignore operation component))
+             (uiop:symbol-call '#:cl-jobpond/tests '#:run-completion-tests)))
