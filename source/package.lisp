@@ -40,6 +40,7 @@
            #:job-identifier
            #:job-index
            #:job-inline-only-p
+           #:job-interrupt-on-cancellation-p
            #:job-maximum-runtime-milliseconds
            #:job-name
            #:job-not-found

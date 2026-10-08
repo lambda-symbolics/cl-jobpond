@@ -93,12 +93,34 @@ when a controller asked for cancellation.
 
 =job-cancel= is first-writer. The first accepted request records its reason;
 later requests return =nil=. A queued job leaves the queue and publishes
-=:aborted= immediately. A running job is interrupted on its worker thread.
+=:aborted= immediately. A running job is interrupted on its worker thread by
+default.
 
 Interrupts are best effort. A body blocked where the host cannot deliver them
 stops at its next =job-check-cancellation= or =job-report-progress= call.
 =job-aborted= is a =serious-condition=, so a body that handles =error= broadly
 lets cancellation through.
+
+For a body with its own cancellation polling, specialize
+=job-interrupt-on-cancellation-p= to return =nil=:
+
+#+BEGIN_SRC lisp
+(defclass polling-job (cl-jobpond:job) ())
+
+(defmethod cl-jobpond:job-interrupt-on-cancellation-p ((job polling-job))
+  nil)
+
+(cl-jobpond:make-job-pool :job-class 'polling-job)
+#+END_SRC
+
+The method runs on the cancelling thread outside lifecycle locks. Return
+promptly without signalling, and keep the policy stable throughout the run.
+The body must poll =job-cancellation-requested-p= or call
+=job-check-cancellation= at bounded intervals and unwind promptly, including
+during pool shutdown. No asynchronous interrupt is sent for this job.
+Cancellation reasons, subtree cancellation and deadlines use the same state
+transitions. If the body returns normally after cancellation, publication
+resolves it to =:aborted= and discards the returned value.
 
 * Deadlines
 

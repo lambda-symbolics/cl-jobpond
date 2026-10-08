@@ -1590,6 +1590,7 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
   (tests--running-cancellation)
   (tests--queued-cancellation)
   (tests--cooperative-cancellation)
+  (tests--cancellation-policy)
   (tests--late-completion-downgrade)
   (tests--terminal-result-hook)
   (tests--pool-deadline)

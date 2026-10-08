@@ -1,5 +1,23 @@
 (in-package #:cl-jobpond)
 
+;;;; -- Cancellation Policy --
+
+(defgeneric job-interrupt-on-cancellation-p (job)
+  (:documentation
+   "Return true when cancellation should asynchronously interrupt JOB's worker.
+
+The default method returns T. A subclass may return NIL for cooperative
+cancellation. Its body must poll JOB-CANCELLATION-REQUESTED-P or call
+JOB-CHECK-CANCELLATION and unwind promptly, including during pool shutdown.
+Methods run on the cancelling thread, outside lifecycle locks, and must return
+promptly without signalling. Policy must be stable throughout the job's run.
+Queued cancellation and terminal publication do not consult this policy."))
+
+(defmethod job-interrupt-on-cancellation-p ((job job))
+  "Use asynchronous cancellation for ordinary jobs."
+  t)
+
+
 ;;;; -- Cancellation Interrupt Guard --
 
 (defun job--cancellation-interrupt-applicable-p (job run-token)
@@ -58,9 +76,10 @@ a second time. A job that is already terminal, or that has claimed its terminal
 publication, is never cancelled.
 
 A queued job leaves the pool queue and publishes :ABORTED immediately, because no
-worker will ever pick it up. A running job is interrupted on its worker thread
-with a closure guarded by JOB--CANCELLATION-INTERRUPT-APPLICABLE-P, so a delayed
-interrupt cannot strike whichever job that worker runs next.
+worker will ever pick it up. When JOB-INTERRUPT-ON-CANCELLATION-P returns true, a
+running job is interrupted on its worker thread with a closure guarded by
+JOB--CANCELLATION-INTERRUPT-APPLICABLE-P, so a delayed interrupt cannot strike
+whichever job that worker runs next. Otherwise its body must stop cooperatively.
 
 An interrupt is best effort. A body that blocks where the host cannot deliver
 interrupts stops at its next JOB-CHECK-CANCELLATION or JOB-REPORT-PROGRESS call
@@ -102,7 +121,8 @@ instead."
          nil
          :report (format nil "Job ~A was ~(~A~) before it started."
                          (job-identifier job) reason)))
-      (when (and thread run-token (thread-alive-p thread))
+      (when (and thread run-token (thread-alive-p thread)
+                 (job-interrupt-on-cancellation-p job))
         (interrupt-thread
          thread
          (lambda ()

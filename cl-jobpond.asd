@@ -24,7 +24,8 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "package")
-                             (:file "tests"))))
+                             (:file "tests")
+                             (:file "cancellation-policy-tests"))))
   :perform (asdf:test-op (operation component)
              (declare (ignore operation component))
              (uiop:symbol-call '#:cl-jobpond/tests '#:run-tests)))
