@@ -156,41 +156,61 @@ terminal record actually contains. See JOB--RESOLVE-TERMINAL-RECORD."
           (job--force-terminal-failure job condition condition))))
     publish-p))
 
-(defun job--force-terminal-failure
-    (job execution-condition publication-condition)
-  "Force JOB terminal when normal terminal publication itself failed.
-
-This is the last line of defence. It writes the smallest possible terminal state
-without calling anything that can fail, so a job never stays live after its
-worker gave up on it. Waiters are always woken, even when the state was already
-terminal, so a lost broadcast cannot strand them."
-  (let* ((reason (with-lock-held ((job--lock job))
-                   (job-cancellation-reason job)))
-         (state  (if reason :aborted :failed))
-         (report
-           (jobpond--bounded-string
-            (format nil "Job failure: ~A; publication failure: ~A"
-                    execution-condition publication-condition)))
-         (result (job--force-terminal-record job state report))
-         (event  nil))
+(defun job--commit-forced-terminal (job report result)
+  "Commit one forced terminal result, choosing its state under the job lock."
+  (let ((event nil))
     (with-lock-held ((job--lock job))
       (unless (job--terminal-state-p (job-state job))
-        (job--compact-progress job state)
-        (setf (job-state job) state
-              (job--publication-claimed-p job) nil
-              (job-result job) result
-              (job-condition-report job) report
-              (job-ended-at job) (get-internal-real-time)
-              (job--thread job) nil
-              (job-run-token job) nil
-              (job-deadline job) nil
-              event (job--lifecycle-event job state))
-        (job-pool--retain-terminal-locked (job-pool job) job)))
-    (with-lock-held ((job--lock job))
+        (let ((state (if (job-cancellation-reason job) :aborted :failed)))
+          (job--compact-progress job state)
+          (setf (job-state job) state
+                (job--publication-claimed-p job) nil
+                (job-result job) result
+                (job-condition-report job) report
+                (job-ended-at job) (get-internal-real-time)
+                (job--thread job) nil
+                (job-run-token job) nil
+                (job-deadline job) nil
+                event (job--lifecycle-event job state))
+          (job-pool--retain-terminal-locked (job-pool job) job)))
       (jobpond--condition-broadcast (job--condition-variable job)))
     (when event
       (job-pool-emit (job-pool job) :job-lifecycle event))
     nil))
+
+(defun job--force-terminal-failure
+    (job execution-condition publication-condition)
+  "Force JOB terminal when normal terminal publication itself failed.
+
+Preserve the host's failure record when its hook can produce one. A failing
+condition printer falls back to condition types before the terminal commit."
+  (let* ((state  (with-lock-held ((job--lock job))
+                   (if (job-cancellation-reason job) :aborted :failed)))
+         (report
+           (handler-case
+               (jobpond--bounded-string
+                (format nil "Job failure: ~A; publication failure: ~A"
+                        execution-condition publication-condition))
+             (serious-condition ()
+               (jobpond--bounded-string
+                (format nil "Job failure of type ~A; publication failure of type ~A"
+                        (type-of execution-condition) (type-of publication-condition))))))
+         (result (job--force-terminal-record job state report)))
+    (job--commit-forced-terminal job report result)))
+
+(defun job--escaped-run-report (job escaping-condition)
+  "Return a bounded escape report without invoking the condition's printer."
+  (handler-case
+      (jobpond--bounded-string
+       (format nil "Job ~A exited without publishing a terminal result~@[; last observed condition type ~A~]."
+               (job-identifier job)
+               (and escaping-condition (type-of escaping-condition))))
+    (serious-condition ()
+      "Job exited without publishing a terminal result.")))
+
+(defun job--publish-escaped-run (job escaping-condition)
+  "Force an escaped run terminal without invoking its host result hook."
+  (job--commit-forced-terminal job (job--escaped-run-report job escaping-condition) nil))
 
 
 ;;;; -- Job Execution --
@@ -222,6 +242,8 @@ caller must not run its body. The caller holds JOB's lifecycle lock."
 The job body is called with JOB as its only argument. Returning normally
 publishes :COMPLETED with the returned value, signalling JOB-ABORTED publishes
 :ABORTED, and signalling any other error publishes :FAILED with a bounded report.
+Any other non-local exit forces :FAILED (or :ABORTED after cancellation) with a
+bounded report and runs no host result hook. The original transfer continues.
 
 *CURRENT-JOB* and *CURRENT-RUN-TOKEN* are bound around the body so a cancellation
 interrupt delivered to this thread can prove it still belongs to this run."
@@ -233,22 +255,26 @@ interrupt delivered to this thread can prove it still belongs to this run."
       (when started-p
         (job--set-progress-state job :running)))
     (when started-p
-      (job-pool-emit pool :job-lifecycle (job--lifecycle-event job :started))
-      (let ((*current-job*       job)
-            (*current-run-token* token))
-        (handler-case
-            (job--publish-terminal
-             job
-             :completed
-             (funcall (job--body-function job) job))
-          (job-aborted (condition)
-            (job--publish-terminal job
-                                   :aborted
-                                   nil
-                                   :report (princ-to-string condition)))
-          (error (condition)
-            (job--publish-terminal job
-                                   :failed
-                                   nil
-                                   :report (princ-to-string condition)))))))
+      (let ((terminal-reached-p nil)
+            (escaping-condition nil))
+        (unwind-protect
+             (progn
+               (job-pool-emit pool :job-lifecycle (job--lifecycle-event job :started))
+               (let ((*current-job*       job)
+                     (*current-run-token* token))
+                 (handler-bind ((serious-condition
+                                  (lambda (condition)
+                                    (setf escaping-condition condition))))
+                   (handler-case
+                       (job--publish-terminal
+                        job :completed (funcall (job--body-function job) job))
+                     (job-aborted (condition)
+                       (job--publish-terminal job :aborted nil
+                                              :report      (princ-to-string condition)))
+                     (error (condition)
+                       (job--publish-terminal job :failed nil
+                                              :report     (princ-to-string condition))))))
+               (setf terminal-reached-p (job-terminal-p job)))
+          (unless terminal-reached-p
+            (job--publish-escaped-run job escaping-condition))))))
   nil)

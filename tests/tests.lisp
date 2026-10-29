@@ -1576,6 +1576,467 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
                      "a deferred pool has threads once it has been used"))))
   nil)
 
+(defun tests--escape-submit (pool &rest arguments &key function &allow-other-keys)
+  "Admit through the public positional-function API with readable fixture options."
+  (let ((options (copy-list arguments)))
+    (remf options :function)
+    (apply #'job-pool-submit pool function options)))
+
+
+;;;; -- Escaped execution regression cases --
+
+(define-condition tests--printer-error (error)
+  ()
+  (:documentation "The failure raised by the deliberately unprintable condition."))
+
+(define-condition tests--unprintable-condition (error)
+  ()
+  (:documentation "An error whose printer fails during terminal publication."))
+
+(defmethod print-object ((condition tests--unprintable-condition) stream)
+  "Raise the owned printer error instead of rendering CONDITION."
+  (declare (ignore condition stream))
+  (error 'tests--printer-error))
+
+(defclass tests--escape-cooperative-job (cl-jobpond:job)
+  ()
+  (:documentation "A job that observes cancellation without a thread interrupt."))
+
+(defmethod cl-jobpond:job-interrupt-on-cancellation-p ((job tests--escape-cooperative-job))
+  "Keep this fixture's cancellation cooperative."
+  (declare (ignore job)) nil)
+
+(defun tests--escape-statuses (collector job)
+  "Return the lifecycle statuses observed for JOB."
+  (loop for event in (tests--collector-events collector :channel :job-lifecycle)
+        when (eq job (getf (rest event) :job)) collect (getf (rest event) :status)))
+
+(defun tests--escape-observe (pool job collector &key (hook-count 0) (expected-hooks 0) (state :failed) report)
+  "Assert the terminal boundary without repairing a stranded baseline job."
+  (multiple-value-bind (snapshot terminal-p) (job-await job :timeout-seconds 5)
+    (declare (ignore snapshot))
+    (test-assert (eq state (job-state job)) "escaped job terminal state")
+    (test-assert terminal-p "escaped job waiter observes terminal publication"))
+  (test-assert (= 1 (count-if (lambda (status) (member status '(:completed :failed :aborted)))
+                             (tests--escape-statuses collector job)))
+               "exactly one terminal lifecycle event")
+  (test-assert (null (job-run-token job)) "run token released")
+  (test-assert (null (job-deadline job)) "deadline released")
+  (test-assert (null (cl-jobpond::job--thread job)) "execution thread slot released")
+  (test-assert (zerop (job-pool-live-count pool)) "pool live ownership released")
+  (test-assert (= expected-hooks hook-count) "terminal hook consultation count")
+  (when report
+    (test-assert (and (job-condition-report job)
+                      (search report (job-condition-report job) :test #'char-equal))
+                 "bounded report identifies escaped execution"))
+  (let ((next (tests--escape-submit pool :function (lambda (job) (declare (ignore job)) :next))))
+    (job-await next :timeout-seconds 5)
+    (test-assert (eq :completed (job-state next)) "same pool executes a subsequent ordinary job")))
+
+(defun tests--escape-inline-case (kind)
+  "Run an owned inline claim through actual execution and publication entrypoints."
+  (let* ((pool (make-job-pool :maximum-concurrency 1))
+         (collector (tests--make-collector)) (hooks 0) (body-count 0)
+         (late-cancel :not-called) (condition (make-condition 'tests--rude-condition))
+         (caught nil) (job nil))
+    (when (eq kind :started)
+      (job-pool-add-listener pool
+       (lambda (channel payload)
+         (when (and (eq channel :job-lifecycle) (eq (getf payload :status) :started))
+           (throw 'escape :started)))))
+    (when (member kind '(:terminal-listener :late-cancel))
+      (job-pool-add-listener pool
+       (lambda (channel payload)
+         (when (and (eq channel :job-lifecycle) (eq (getf payload :job) job)
+                    (member (getf payload :status) '(:failed :aborted)))
+           (if (eq kind :terminal-listener) (throw 'listener :superseded)
+               (setf late-cancel (job-cancel job :reason :late)))))))
+    (job-pool-add-listener pool (tests--collector-listener collector))
+    (unwind-protect
+         (progn
+           (setf job
+                 (tests--escape-submit pool :inline-only-p t
+                  :terminal-result-function
+                  (lambda (job state result report)
+                    (declare (ignore job)) (incf hooks)
+                    (case kind
+                      (:hook
+                       (throw 'escape :hook))
+                      (:held-claim
+                       (error 'tests--unprintable-condition))
+                      (otherwise
+                       (values result report state))))
+                  :function
+                  (lambda (job)
+                    (declare (ignore job)) (incf body-count)
+                    (case kind
+                      (:restart
+                       (invoke-restart 'escape-restart))
+                      (:serious
+                       (signal condition))
+                      (:printer
+                       (error 'tests--unprintable-condition))
+                      ((:hook :held-claim)
+                       :value)
+                      (otherwise
+                       (throw 'escape :escaped))))))
+           ;; RETURN-FROM needs a lexical target enclosing the real runner.
+           (setf caught
+                 (catch 'listener
+                   (catch 'escape
+                     (handler-case
+                         (restart-case (job-run-inline job)
+                           (escape-restart () :restarted))
+                       (tests--rude-condition (seen) seen)
+                       (tests--printer-error (seen) seen)))))
+           (tests--escape-observe pool job collector :hook-count hooks :expected-hooks
+                                  (case kind (:held-claim
+                                              2)
+                                             (:hook
+                                              1)
+                                             (otherwise
+                                              0))
+                                  :report (case kind
+                                            (:printer
+                                             "TESTS--PRINTER-ERROR")
+                                            (:serious
+                                             "RUDE-CONDITION")
+                                            (:held-claim
+                                             "UNPRINTABLE-CONDITION")
+                                            (otherwise
+                                             "exited without publishing")))
+           (case kind
+             (:serious
+              (test-assert (eq caught condition) "same serious condition reaches outer handler"))
+             (:restart
+              (test-assert (eq caught :restarted) "caller restart receives original transfer"))
+             (:hook
+              (test-assert (eq caught :hook) "hook transfer reaches caller"))
+             (:started
+              (test-assert (zerop body-count) "started listener escape prevents body execution"))
+             (:printer
+              (test-assert (typep caught 'tests--printer-error) "printer error reaches caller"))
+             (:held-claim
+              (test-assert (null (cl-jobpond::job--publication-claimed-p job)) "abandoned publication claim cleared")
+              (test-assert (null (job-result job)) "failed host record has nil result"))
+             (:terminal-listener
+              (test-assert (eq caught :superseded) "listener transfer supersedes committed escape"))
+             (:late-cancel
+              (test-assert (null late-cancel) "post-commit cancellation refused"))
+             (otherwise
+              (test-assert (eq caught :escaped) "throw value reaches caller unchanged"))))
+      (job-pool-close pool))))
+
+(defun tests--escape-return ()
+  "Preserve a lexical return while publishing the escaped inline run."
+  (let* ((pool (make-job-pool :maximum-concurrency 1))
+         (collector (tests--make-collector)) (job nil) (caught nil))
+    (job-pool-add-listener pool (tests--collector-listener collector))
+    (unwind-protect
+         (progn
+           (setf caught
+                 (block outer
+                   (setf job (tests--escape-submit pool :inline-only-p t
+                              :function                                (lambda (job) (declare (ignore job))
+                                                                         (return-from outer :returned))))
+                   (job-run-inline job)))
+           (tests--escape-observe pool job collector :report "exited without publishing")
+           (test-assert (eq :returned caught) "RETURN-FROM reaches caller block"))
+      (job-pool-close pool))))
+
+(defun tests--escape-worker-case (kind)
+  "Observe an owned worker escape selected by KIND."
+  (let* ((pool      (make-job-pool :maximum-concurrency 1))
+         (collector (tests--make-collector))
+         (started (tests--make-gate)) (never (tests--make-gate)) (job nil))
+    (job-pool-add-listener pool (tests--collector-listener collector))
+    (unwind-protect
+         (progn
+           (setf job (tests--escape-submit pool :function
+                      (lambda (job) (declare (ignore job))
+                        (tests--gate-open started)
+                        (case kind
+                          (:destroy
+                           (tests--gate-await never))
+                          (:abort
+                           #+sbcl (sb-thread:abort-thread)
+                           #-sbcl (error "ABORT-THREAD unsupported"))
+                          (:serious
+                           (signal 'tests--rude-condition))))))
+           (test-assert (tests--gate-await started :timeout-seconds 5) "worker body start acknowledged")
+           (when (eq kind :destroy)
+             (bordeaux-threads:destroy-thread (cl-jobpond::job--thread job)))
+           (tests--escape-observe pool job collector
+                                  :report (if (eq kind :serious) "rude" "exited without publishing")))
+      (tests--gate-open never)
+      (job-pool-close pool))))
+
+(defun tests--escape-hook-controls ()
+  "Check ordinary terminal hook errors and invalid states."
+  (dolist (kind '(:value :error :abort))
+    (let* ((pool  (make-job-pool :maximum-concurrency 1))
+           (collector (tests--make-collector)) (hooks 0) (job nil)
+           (state (ecase kind (:value
+                               :completed)
+                              (:error
+                               :failed)
+                              (:abort
+                               :aborted))))
+      (job-pool-add-listener pool (tests--collector-listener collector))
+      (unwind-protect
+           (progn
+             (setf job (tests--escape-submit pool :inline-only-p t
+                        :terminal-result-function
+                        (lambda (job state result report)
+                          (declare (ignore job)) (incf hooks) (values result report state))
+                        :function                                (lambda (job)
+                                                                   (ecase kind (:value
+                                                                                :value)
+                                                                     (:error
+                                                                      (error "ordinary"))
+                                                                     (:abort
+                                                                      (error 'job-aborted :identifier (job-identifier job) :reason :user :message "ordinary abort"))))))
+             (job-run-inline job)
+             (tests--escape-observe pool job collector :hook-count hooks :expected-hooks 1 :state state)
+             (test-assert (equal (list :started state) (tests--escape-statuses collector job))
+                          "ordinary terminal statuses retain exact ordering"))
+        (job-pool-close pool)))))
+
+(defun tests--escape-join (thread)
+  "Bound fixture cleanup, terminating and reaping only its owned thread on timeout."
+  (labels ((join-within-bound ()
+             (let ((deadline (+ (get-internal-real-time)
+                                (* 5 internal-time-units-per-second))))
+               (loop for remaining = (- deadline (get-internal-real-time))
+                     while (and (bordeaux-threads:thread-alive-p thread)
+                                (plusp remaining))
+                     do (sleep (min 0.01 (/ remaining internal-time-units-per-second))))
+               (unless (bordeaux-threads:thread-alive-p thread)
+                 (bordeaux-threads:join-thread thread)
+                 t))))
+    (when thread
+      (unless (join-within-bound)
+        (unwind-protect
+             (when (bordeaux-threads:thread-alive-p thread)
+               (bordeaux-threads:destroy-thread thread))
+          (unless (join-within-bound)
+            (error "Fixture thread ~S did not terminate after bounded cleanup." thread)))
+        (error "Fixture thread ~S exceeded its bounded join." thread)))))
+
+(defun tests--escape-cancel-case (cooperative-p)
+  "Escape after accepted cooperative or interrupting cancellation."
+  (let* ((pool (make-job-pool :maximum-concurrency 1 :job-class (if cooperative-p 'tests--escape-cooperative-job 'cl-jobpond:job))) (collector (tests--make-collector))
+         (ready (tests--make-gate)) (go (tests--make-gate)) (interrupt-seen (tests--make-gate)) (done (tests--make-gate))
+         (runner nil) (job nil) (caught nil))
+    (job-pool-add-listener pool (tests--collector-listener collector))
+    (unwind-protect
+         (progn
+           (setf job (tests--escape-submit pool :inline-only-p t
+                      :function                                (lambda (job) (declare (ignore job))
+                                                                 (handler-case
+                                                                     (progn (tests--gate-open ready) (tests--gate-await go))
+                                                                   (job-aborted () (tests--gate-open interrupt-seen)))
+                                                                 (throw 'escape :escaped))))
+           (setf runner (make-thread
+                         (lambda () (unwind-protect
+                                        (setf caught (catch 'escape (job-run-inline job)))
+                                      (tests--gate-open done)))))
+           (test-assert (tests--gate-await ready :timeout-seconds 5) "cancellation body barrier acknowledged")
+           (test-assert (job-cancel job :reason (if cooperative-p :race :timeout)) "running cancellation accepted")
+           (unless cooperative-p
+             (test-assert (tests--gate-await interrupt-seen :timeout-seconds 5) "body swallowed the real cancellation interrupt"))
+           (tests--gate-open go)
+           (test-assert (tests--gate-await done :timeout-seconds 5) "inline runner unwound to its catch")
+           (tests--escape-observe pool job collector :state :aborted :report "exited without publishing")
+           (test-assert (eq :escaped caught) "cancelled body transfer preserved")
+           (test-assert (eq (job-cancellation-reason job) (if cooperative-p :race :timeout))
+                        "accepted cancellation reason retained"))
+      (tests--gate-open go)
+      (unwind-protect (tests--escape-join runner)
+        (job-pool-close pool)))))
+
+(defun tests--escaped-worker-execution ()
+  "Check destruction, abort, and serious conditions on owned workers."
+  (tests--escape-worker-case :destroy)
+  #+sbcl (tests--escape-worker-case :abort)
+  (tests--escape-worker-case :serious))
+
+(defun tests--escaped-inline-execution ()
+  "Check inline transfers, publication hooks, and listener escapes."
+  (dolist (kind '(:throw :restart :serious :hook :started :terminal-listener :printer :held-claim :late-cancel))
+    (tests--escape-inline-case kind))
+  (tests--escape-return)
+  (tests--escape-hook-controls))
+
+(defun tests--escaped-cancellation-races ()
+  "Check accepted cancellation before an escaping body unwinds."
+  (tests--escape-cancel-case t)
+  (tests--escape-cancel-case nil))
+
+(defun tests--escape-real-cancellation-closure ()
+  "Deliver the real cancellation closure into the cleanup dynamic state (GREEN only)."
+  (let* ((pool     (make-job-pool :maximum-concurrency 1))
+         (collector (tests--make-collector)) (ready (tests--make-gate))
+         (go (tests--make-gate)) (ack (tests--make-gate)) (done (tests--make-gate))
+         (original (fdefinition 'bordeaux-threads:interrupt-thread))
+         (bindings :unobserved) (aborted nil) (runner nil)
+         (job      (job-pool-submit pool (lambda (job) (declare (ignore job))) :inline-only-p t)))
+    (job-pool-add-listener pool (tests--collector-listener collector))
+    (unwind-protect
+         (progn
+           (setf runner
+                 (make-thread
+                  (lambda ()
+                    (unwind-protect
+                         (handler-bind ((job-aborted (lambda (condition) (setf aborted condition))))
+                           (with-lock-held ((cl-jobpond::job--lock job))
+                             (cl-jobpond::job--start-locked job "cleanup-test-token"))
+                           (let ((cl-jobpond::*current-job*              nil)
+                                 (cl-jobpond::*current-run-token*        nil)
+                                 (cl-jobpond::*terminal-publication-job* nil))
+                             (tests--gate-open ready)
+                             (tests--gate-await go :timeout-seconds 5)
+                             (funcall (fdefinition 'cl-jobpond::job--commit-forced-terminal)
+                                      job "forced" nil)))
+                      (tests--gate-open done)))))
+           (test-assert (tests--gate-await ready :timeout-seconds 5) "cleanup environment acknowledged")
+           (setf (fdefinition 'bordeaux-threads:interrupt-thread)
+                 (lambda (thread function &rest arguments)
+                   (apply original thread
+                          (lambda ()
+                            (setf bindings
+                                  (list cl-jobpond::*current-job* cl-jobpond::*current-run-token*
+                                        cl-jobpond::*terminal-publication-job*))
+                            (funcall function)
+                            (tests--gate-open ack)) arguments)))
+           (test-assert (job-cancel job :reason :race) "real cancellation accepted before forced commit")
+           (test-assert (tests--gate-await ack :timeout-seconds 5) "real interrupt closure ran and returned on cleanup thread")
+           (test-assert (equal bindings '(nil nil nil)) "interrupt observed unbound cleanup context")
+           (test-assert (null aborted) "cancellation guard declined cleanup interrupt")
+           (tests--gate-open go)
+           (test-assert (tests--gate-await done :timeout-seconds 5) "forced commit thread completed")
+           (tests--escape-observe pool job collector :state :aborted)
+           (test-assert (eq :race (job-cancellation-reason job)) "precommit cancellation reason retained"))
+      (setf (fdefinition 'bordeaux-threads:interrupt-thread) original)
+      (tests--gate-open go)
+      (unwind-protect (tests--escape-join runner)
+        (job-pool-close pool)))
+    (test-assert (eq original (fdefinition 'bordeaux-threads:interrupt-thread)) "interrupt wrapper restored")))
+
+(defun tests--escape-delayed-interrupt ()
+  "Deliver A's retained real cancellation closure during B on the same thread."
+  (let* ((pool      (make-job-pool :maximum-concurrency 1))
+         (collector (tests--make-collector))
+         (a-ready (tests--make-gate)) (a-go (tests--make-gate))
+         (b-ready (tests--make-gate)) (b-go (tests--make-gate))
+         (ack (tests--make-gate)) (done (tests--make-gate))
+         (original  (fdefinition 'bordeaux-threads:interrupt-thread))
+         (retained nil) (target nil) (a-thread nil) (b-thread nil)
+         (delivery-thread nil) (aborted nil) (runner nil) (caught nil)
+         (a         (job-pool-submit pool
+                      (lambda (job) (declare (ignore job))
+                        (setf a-thread (current-thread))
+                        (tests--gate-open a-ready)
+                        (tests--gate-await a-go :timeout-seconds 5)
+                        (throw 'escape :escaped)) :inline-only-p t))
+         (b         (job-pool-submit pool
+                      (lambda (job) (declare (ignore job))
+                        (setf b-thread (current-thread))
+                        (handler-bind ((job-aborted (lambda (condition) (setf aborted condition))))
+                          (tests--gate-open b-ready)
+                          (tests--gate-await b-go :timeout-seconds 5)
+                          :b)) :inline-only-p t)))
+    (job-pool-add-listener pool (tests--collector-listener collector))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'bordeaux-threads:interrupt-thread)
+                 (lambda (thread function &rest arguments)
+                   (declare (ignore arguments))
+                   (when retained (error "Unexpected second cancellation interrupt."))
+                   (setf target thread retained function)))
+           (setf runner
+                 (make-thread
+                  (lambda ()
+                    (unwind-protect
+                         (progn
+                           (setf caught (catch 'escape (job-run-inline a)))
+                           (job-run-inline b))
+                      (tests--gate-open done)))))
+           (test-assert (tests--gate-await a-ready :timeout-seconds 5) "A entered owned worker")
+           (test-assert (job-cancel a :reason :stale) "A real cancellation accepted")
+           (unless retained (error "Real cancellation did not supply a closure."))
+           (setf (fdefinition 'bordeaux-threads:interrupt-thread) original)
+           (tests--gate-open a-go)
+           (test-assert (tests--gate-await b-ready :timeout-seconds 5) "same worker advanced to B")
+           (test-assert (eq :escaped caught) "A transfer preserved before B")
+           (test-assert (job-terminal-p a) "escaped A is terminal before B runs")
+           (test-assert (and (eq target runner) (eq a-thread runner) (eq b-thread runner))
+                        "A cancellation target and both executions are the same worker")
+           (funcall original target
+                    (lambda ()
+                      (setf delivery-thread (current-thread))
+                      (funcall retained)
+                      (tests--gate-open ack)))
+           (test-assert (tests--gate-await ack :timeout-seconds 5) "retained real closure returned during B")
+           (test-assert (eq delivery-thread b-thread) "closure delivered on B execution thread")
+           (tests--gate-open b-go)
+           (test-assert (tests--gate-await done :timeout-seconds 5) "same worker completed B")
+           (test-assert (null aborted) "B never receives A cancellation")
+           (test-assert (eq :completed (job-state b)) "B completes after delayed real interrupt")
+           (test-assert (null (job-cancel a :reason :late)) "cancellation of terminal A refused"))
+      (setf (fdefinition 'bordeaux-threads:interrupt-thread) original)
+      (tests--gate-open a-go)
+      (tests--gate-open b-go)
+      (unwind-protect (tests--escape-join runner)
+        (job-pool-close pool)))))
+
+(defun tests--escape-contention ()
+  "Accepted cancellation and forced publication linearize under one job lock."
+  (let ((aborted-count 0) (failed-count 0))
+    (dotimes (iteration 50)
+      (let* ((pool (make-job-pool :maximum-concurrency 1 :job-class 'tests--escape-cooperative-job))
+             (collector (tests--make-collector)) (ready (tests--make-gate))
+             (go (tests--make-gate)) (cancel-ready (tests--make-gate))
+             (done (tests--make-gate)) (cancel-done (tests--make-gate))
+             (runner nil) (canceller nil) (accepted nil)
+             (job  (job-pool-submit pool
+                                   (lambda (job) (declare (ignore job))
+                                     (tests--gate-open ready)
+                                     (tests--gate-await go :timeout-seconds 5)
+                                     (throw 'escape :escaped)) :inline-only-p t)))
+        (job-pool-add-listener pool (tests--collector-listener collector))
+        (unwind-protect
+             (progn
+               (setf runner (make-thread (lambda ()
+                                          (unwind-protect (catch 'escape (job-run-inline job))
+                                            (tests--gate-open done)))))
+               (test-assert (tests--gate-await ready :timeout-seconds 5) "contender body entered")
+               (with-lock-held ((cl-jobpond::job--lock job))
+                 (tests--gate-open go)
+                 (setf canceller (make-thread
+                                  (lambda ()
+                                    (unwind-protect
+                                         (progn (tests--gate-open cancel-ready)
+                                                (setf accepted (job-cancel job :reason :race)))
+                                      (tests--gate-open cancel-done)))))
+                 (test-assert (tests--gate-await cancel-ready :timeout-seconds 5) "canceller scheduled before release"))
+               (test-assert (and (tests--gate-await done :timeout-seconds 5)
+                                 (tests--gate-await cancel-done :timeout-seconds 5)) "both contenders return")
+               (test-assert (eq (not (null accepted)) (eq :aborted (job-state job)))
+                            "accepted cancellation iff committed state is aborted")
+               (test-assert (= 1 (count-if (lambda (state) (member state '(:aborted :failed)))
+                                          (tests--escape-statuses collector job))) "one contended terminal event")
+               (test-assert (nth-value 1 (job-await job :timeout-seconds 5)) "contended job waiter released")
+               (ecase (job-state job) (:aborted
+                                       (incf aborted-count))
+                                      (:failed
+                                       (incf failed-count))))
+          (tests--gate-open go)
+          (unwind-protect (tests--escape-join runner)
+            (unwind-protect (tests--escape-join canceller)
+              (job-pool-close pool))))))
+    (format t "~&CONTENTION :ABORTED ~D :FAILED ~D~%" aborted-count failed-count)))
+
 (defun run-tests ()
   "Run every cl-jobpond regression test."
   (setf *test-count* 0)
@@ -1593,6 +2054,12 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
   (tests--cancellation-policy)
   (tests--late-completion-downgrade)
   (tests--terminal-result-hook)
+  (tests--escaped-worker-execution)
+  (tests--escaped-inline-execution)
+  (tests--escaped-cancellation-races)
+  (tests--escape-real-cancellation-closure)
+  (tests--escape-delayed-interrupt)
+  (tests--escape-contention)
   (tests--pool-deadline)
   (tests--job-deadline)
   (tests--await-timeout)

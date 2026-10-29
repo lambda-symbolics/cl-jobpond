@@ -359,5 +359,31 @@
     (completion-tests--attachment)
     (completion-tests--forget)
     (completion-tests--retired-refresh)
+    (completion-tests--escaped-inline-notice)
     (format t "~&~D completion assertions passed.~%" *coordination-checks*))
   nil)
+
+(defun completion-tests--escaped-inline-notice ()
+  "An escaped job emits exactly one durable notice without a terminal host hook."
+  (let* ((pool (make-job-pool :maximum-concurrency 1)) (stores 0) (wakes 0)
+         (subscription (cl-jobpond:make-completion-subscription
+                        :store  (lambda (snapshot) (declare (ignore snapshot)) (incf stores))
+                        :wakeup (lambda (subscription) (declare (ignore subscription)) (incf wakes)))))
+    (unwind-protect
+         (let ((job (job-pool-submit pool
+                                     (lambda (job) (declare (ignore job)) (throw 'escape :escaped))
+                                     :inline-only-p t)))
+           (cl-jobpond:completion-subscription-watch subscription job :id "escaped-execution")
+           (let ((before-stores stores) (before-wakes wakes))
+             (test-assert (eq :escaped (catch 'escape (job-run-inline job))) "completion case inline transfer preserved")
+             (let ((messages (completion-tests--messages subscription)))
+               (test-assert (= 1 (length messages)) "escaped run produces one subscription message")
+               (test-assert (eq :failure (getf (getf (first messages) :payload) :outcome)) "escaped run notice truthfully reports failure")
+               (test-assert (= 1 (- wakes before-wakes)) "one completion wakeup")
+               (test-assert (= 1 (- stores before-stores)) "one durable terminal store")
+               (cl-jobpond:completion-subscription-refresh subscription)
+               (test-assert (equal messages (completion-tests--messages subscription)) "refresh adds no duplicate message")
+               (test-assert (= 1 (- stores before-stores)) "refresh adds no duplicate store")
+               (test-assert (= 1 (- wakes before-wakes)) "refresh adds no duplicate wakeup"))))
+      (cl-jobpond:completion-subscription-close subscription)
+      (job-pool-close pool))))
