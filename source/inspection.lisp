@@ -169,3 +169,51 @@ broadcasts, so no polling is involved."
                           :timeout remaining)))))
   (let ((snapshot (job-snapshot job)))
     (values snapshot (job--terminal-state-p (getf snapshot :state)))))
+
+(defun job-await-any (jobs &key timeout-seconds)
+  "Wait until one of JOBS is terminal and return that job and its snapshot.
+
+When several are terminal, return the first in JOBS order, so a caller that
+removes each returned job from JOBS collects them all. TIMEOUT-SECONDS bounds
+the wait; NIL waits indefinitely. Return NIL and NIL when the wait times out
+or JOBS is empty. Terminal publication wakes the waiter, so no polling is
+involved, and the waiter is unregistered from every job on any exit."
+  (let ((waiter   (make-instance 'job-waiter))
+        (deadline (if timeout-seconds
+                      (+ (get-internal-real-time)
+                         (* timeout-seconds internal-time-units-per-second))
+                      nil))
+        (watched  nil))
+    (flet ((first-terminal ()
+             "Return the first terminal job in JOBS order, or NIL."
+             (find-if #'job-terminal-p jobs)))
+      (unwind-protect
+           (block await
+             (when (null jobs)
+               (return-from await (values nil nil)))
+             (dolist (job jobs)
+               (with-lock-held ((job--lock job))
+                 (when (job--terminal-state-p (job-state job))
+                   (return-from await (values job (job--snapshot-locked job))))
+                 (push waiter (job--waiters job))
+                 (push job watched)))
+             (with-lock-held ((job-waiter--lock waiter))
+               (loop
+                 (when (job-waiter--fired-p waiter)
+                   (return))
+                 (let ((remaining (if deadline
+                                      (/ (max 0 (- deadline (get-internal-real-time)))
+                                         internal-time-units-per-second)
+                                      nil)))
+                   (when (and remaining (<= remaining 0))
+                     (return))
+                   (condition-wait (job-waiter--condition-variable waiter)
+                                   (job-waiter--lock waiter)
+                                   :timeout remaining))))
+             (let ((job (first-terminal)))
+               (if job
+                   (values job (job-snapshot job))
+                   (values nil nil))))
+        (dolist (job watched)
+          (with-lock-held ((job--lock job))
+            (setf (job--waiters job) (delete waiter (job--waiters job)))))))))

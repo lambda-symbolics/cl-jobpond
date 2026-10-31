@@ -150,7 +150,8 @@ terminal record actually contains. See JOB--RESOLVE-TERMINAL-RECORD."
                     (job-deadline job) nil
                     event (job--lifecycle-event job state))
               (job-pool--retain-terminal-locked (job-pool job) job)
-              (jobpond--condition-broadcast (job--condition-variable job)))
+              (jobpond--condition-broadcast (job--condition-variable job))
+              (job--wake-waiters-locked job))
             (job-pool-emit (job-pool job) :job-lifecycle event))
         (serious-condition (condition)
           (job--force-terminal-failure job condition condition))))
@@ -187,7 +188,8 @@ terminal, so a lost broadcast cannot strand them."
               event (job--lifecycle-event job state))
         (job-pool--retain-terminal-locked (job-pool job) job)))
     (with-lock-held ((job--lock job))
-      (jobpond--condition-broadcast (job--condition-variable job)))
+      (jobpond--condition-broadcast (job--condition-variable job))
+      (job--wake-waiters-locked job))
     (when event
       (job-pool-emit (job-pool job) :job-lifecycle event))
     nil))

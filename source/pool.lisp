@@ -266,6 +266,11 @@
     :initform      (make-condition-variable)
     :reader        job--condition-variable
     :documentation "The condition waking waiters after a state transition.")
+   (waiters
+    :initform      nil
+    :accessor      job--waiters
+    :type          list
+    :documentation "The multi-job waiters terminal publication also wakes.")
    (state
     :initform      :queued
     :accessor      job-state
@@ -331,6 +336,34 @@
 
 
 ;;;; -- Narrow Adapters --
+
+(defclass job-waiter ()
+  ((lock
+    :initform      (make-lock "cl-jobpond job waiter")
+    :reader        job-waiter--lock
+    :documentation "The lock protecting the fired flag.")
+   (condition-variable
+    :initform      (make-condition-variable)
+    :reader        job-waiter--condition-variable
+    :documentation "The condition woken when a watched job becomes terminal.")
+   (fired-p
+    :initform      nil
+    :accessor      job-waiter--fired-p
+    :type          boolean
+    :documentation "True once any watched job became terminal."))
+  (:documentation
+   "One thread waiting for the first of several jobs to become terminal.
+
+Lock order is the job's lock, then the waiter's lock; a waiting thread holds
+only the waiter's lock."))
+
+(defun job--wake-waiters-locked (job)
+  "Wake every multi-job waiter registered with JOB; the caller holds JOB's lock."
+  (dolist (waiter (job--waiters job))
+    (with-lock-held ((job-waiter--lock waiter))
+      (setf (job-waiter--fired-p waiter) t)
+      (jobpond--condition-broadcast (job-waiter--condition-variable waiter))))
+  nil)
 
 (defun jobpond--condition-broadcast (condition-variable)
   "Wake every waiter on CONDITION-VARIABLE and return NIL.

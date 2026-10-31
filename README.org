@@ -122,6 +122,24 @@ Cancellation reasons, subtree cancellation and deadlines use the same state
 transitions. If the body returns normally after cancellation, publication
 resolves it to =:aborted= and discards the returned value.
 
+* Waiting for several jobs
+
+=job-await= waits for one job. =job-await-any= waits until any of a list of jobs
+is terminal and returns that job and its snapshot, or NIL after
+=:timeout-seconds=. With several terminal jobs it returns the first in list
+order, so a caller removing each returned job collects results as they finish
+and can cancel the rest once it has enough.
+
+#+BEGIN_SRC lisp
+(loop with pending = jobs
+      while pending
+      do (let ((job (cl-jobpond:job-await-any pending)))
+           (setf pending (remove job pending))
+           (when (enough-p (cl-jobpond:job-snapshot job))
+             (dolist (rest pending) (cl-jobpond:job-cancel rest :reason :not-needed))
+             (return))))
+#+END_SRC
+
 * Deadlines
 
 A positive =:maximum-runtime-milliseconds= gives every job of the pool a
