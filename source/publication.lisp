@@ -239,10 +239,12 @@ interrupt delivered to this thread can prove it still belongs to this run."
       (let ((*current-job*       job)
             (*current-run-token* token))
         (handler-case
-            (job--publish-terminal
-             job
-             :completed
-             (funcall (job--body-function job) job))
+             (job--publish-terminal
+              job
+              :completed
+              (progn
+                (job-check-cancellation job)
+                (funcall (job--body-function job) job)))
           (job-aborted (condition)
             (job--publish-terminal job
                                    :aborted

@@ -1555,6 +1555,46 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
         (tests--gate-open release))))
   nil)
 
+(defun tests--cancellation-before-body-entry ()
+  "Ensure cancellation reported at startup prevents body entry."
+  (let ((pool            (make-job-pool :name                "startup cancellation"
+                                        :maximum-concurrency 1
+                                        :start-threads-p     nil))
+        (body-entered-p  nil)
+        (callback-states nil))
+    (unwind-protect
+         (progn
+           (job-pool-add-listener
+            pool
+            (lambda (channel event)
+              (when (and (eq channel :job-lifecycle)
+                         (eq (getf event :status) :started))
+                (job-cancel (getf event :job)))))
+           (let ((job (first
+                       (job-pool-submit-batch
+                        pool
+                        (list
+                         (list :inline-only-p t
+                               :function
+                               (lambda (job)
+                                 (declare (ignore job))
+                                 (setf body-entered-p t)
+                                 :body-ran)
+                               :terminal-result-function
+                               (lambda (job state result report)
+                                 (declare (ignore job))
+                                 (push state callback-states)
+                                 (values result report state))))))))
+             (job-run-inline job)
+             (test-assert (null body-entered-p)
+                          "startup cancellation prevents body entry")
+             (test-assert (eq (job-cancellation-reason job) :cancelled)
+                          "startup cancellation records its reason")
+             (test-assert (equal callback-states '(:aborted))
+                          "startup cancellation publishes one aborted callback")))
+      (job-pool-close pool)))
+  nil)
+
 (defun tests--deferred-threads ()
   "Exercise a pool that starts no threads until its first admission."
   (let ((before (length (all-threads))))
@@ -1623,6 +1663,7 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
   (tests--queued-cancellation)
   (tests--cooperative-cancellation)
   (tests--cancellation-policy)
+  (tests--cancellation-before-body-entry)
   (tests--late-completion-downgrade)
   (tests--terminal-result-hook)
   (tests--pool-deadline)
