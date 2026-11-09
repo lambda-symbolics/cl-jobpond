@@ -76,6 +76,20 @@ validated before any policy changes.
  :maximum-runtime-milliseconds 30000)
 #+END_SRC
 
+** Host work on a running job
+
+Use =(job-call-with-admission job predicate)= to atomically check the lifecycle
+and make a host admission decision. The zero-argument predicate runs only while
+the job is running and neither cancellation nor terminal publication has claimed
+it. Its values pass through unchanged; lifecycle rejection returns =nil= and
+=:not-running= or =:closing=.
+
+Keep the predicate bounded and acquire host locks only inside admission, in a
+consistent order. It must not wait for work or call job operations. Predicate
+conditions propagate with the lifecycle lock released; the host owns any changes
+it made before signalling. Admission does not claim terminal publication. The
+later =:terminal-result-function= runs outside the lifecycle lock.
+
 * Progress
 
 A body calls =job-report-progress= to publish a progress value, append to a

@@ -1648,6 +1648,160 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
                        "every wait unregisters its waiter")))))
   nil)
 
+(defun tests--host-admission ()
+  "Exercise host admission rejection, multiple values, and predicate failure."
+  (let ((started (tests--make-gate))
+        (release (tests--make-gate)))
+    (with-test-pool (pool :name "cl-jobpond host admission" :maximum-concurrency 1
+                          :job-class 'tests--cooperative-job)
+      (let* ((running  (job-pool-submit
+                        pool
+                        (lambda (job)
+                          (declare (ignore job))
+                          (tests--gate-open started)
+                          (tests--gate-await release))
+                        :name "running"))
+             (queued   (job-pool-submit pool (lambda (job) (declare (ignore job)))
+                                       :name "queued"))
+             (called-p nil))
+        (unwind-protect
+             (progn
+               (test-assert (tests--gate-await started) "the admission fixture starts")
+               (test-assert
+                (equal (multiple-value-list
+                        (cl-jobpond:job-call-with-admission
+                         queued (lambda () (setf called-p t))))
+                       '(nil :not-running))
+                "queued jobs reject admission before invoking the host")
+               (test-assert (not called-p) "a rejected lifecycle does not invoke the host")
+               (test-assert
+                (equal (multiple-value-list
+                        (cl-jobpond:job-call-with-admission
+                         running (lambda () (values nil :host-rejection 17))))
+                       '(nil :host-rejection 17))
+                "host rejection preserves every returned value")
+               (test-assert
+                (signals tests--rude-condition
+                  (cl-jobpond:job-call-with-admission
+                   running (lambda () (error 'tests--rude-condition))))
+                "predicate conditions propagate")
+               (test-assert
+                (cl-jobpond:job-call-with-admission running (constantly t))
+                "predicate failure releases the lock without closing admission")
+               (job-cancel running :reason :test)
+               (test-assert
+                (equal (multiple-value-list
+                        (cl-jobpond:job-call-with-admission running (constantly t)))
+                       '(nil :closing))
+                "cancellation closes admission before the body exits"))
+          (tests--gate-open release))
+        (tests--await-completed running)
+        (tests--await-completed queued)
+        (test-assert
+         (equal (multiple-value-list
+                 (cl-jobpond:job-call-with-admission running (constantly t)))
+                '(nil :not-running))
+         "terminal jobs reject host admission"))))
+  nil)
+
+(defun tests--host-admission-races ()
+  "Serialize admission with cancellation and publication without holding the hook lock."
+  (dolist (contender '(:completion :cancellation))
+    (let ((started             (tests--make-gate))
+          (body-release        (tests--make-gate))
+          (body-returning      (tests--make-gate))
+          (admission-entered   (tests--make-gate))
+          (admission-release   (tests--make-gate))
+          (contender-started   (tests--make-gate))
+          (contender-finished  (tests--make-gate))
+          (hook-entered        (tests--make-gate))
+          (admission-thread    nil)
+          (cancellation-thread nil)
+          (admitted-p          nil)
+          (hook-after-admit-p  nil)
+          (hook-admission      nil)
+          (hook-count          0))
+      (with-test-pool (pool :name "cl-jobpond host admission race" :maximum-concurrency 1
+                            :job-class 'tests--cooperative-job)
+        (let ((job (job-pool-submit
+                    pool
+                    (lambda (job)
+                      (declare (ignore job))
+                      (tests--gate-open started)
+                      (tests--gate-await body-release)
+                      (tests--gate-open body-returning)
+                      :result)
+                    :name "racer"
+                    :terminal-result-function
+                    (lambda (job state result report)
+                      (incf hook-count)
+                      (setf hook-after-admit-p admitted-p
+                            hook-admission
+                            (multiple-value-list
+                             (cl-jobpond:job-call-with-admission job (constantly t))))
+                      (tests--gate-open hook-entered)
+                      (values result report state)))))
+          (unwind-protect
+               (progn
+                 (test-assert (tests--gate-await started) "the race body starts")
+                 (setf admission-thread
+                       (make-thread
+                        (lambda ()
+                          (cl-jobpond:job-call-with-admission
+                           job
+                           (lambda ()
+                             ;; Only the test stalls a predicate to force contention.
+                             (tests--gate-open admission-entered)
+                             (tests--gate-await admission-release)
+                             (setf admitted-p t))))
+                        :name "cl-jobpond host admission contender"))
+                 (test-assert (tests--gate-await admission-entered)
+                              "the host owns admission before the competing transition")
+                 (ecase contender
+                   (:completion
+                    (tests--gate-open body-release)
+                    (test-assert (tests--gate-await body-returning)
+                                 "the body attempts completion during admission")
+                    (test-assert (not (tests--gate-await hook-entered :timeout-seconds 0.03))
+                                 "publication waits until admission releases the lock"))
+                   (:cancellation
+                    (setf cancellation-thread
+                          (make-thread
+                           (lambda ()
+                             (tests--gate-open contender-started)
+                             (job-cancel job :reason :test)
+                             (tests--gate-open contender-finished))
+                           :name "cl-jobpond cancellation contender"))
+                    (test-assert (tests--gate-await contender-started)
+                                 "cancellation contends with host admission")
+                    (test-assert
+                     (not (tests--gate-await contender-finished :timeout-seconds 0.03))
+                     "cancellation waits until admission releases the lock")))
+                 (tests--gate-open admission-release)
+                 (join-thread admission-thread)
+                 (setf admission-thread nil)
+                 (when cancellation-thread
+                   (join-thread cancellation-thread)
+                   (setf cancellation-thread nil)
+                   (test-assert
+                    (equal (multiple-value-list
+                            (cl-jobpond:job-call-with-admission job (constantly t)))
+                           '(nil :closing))
+                    "the cancellation winner rejects subsequent admission"))
+                 (tests--gate-open body-release)
+                 (tests--await-completed job)
+                 (test-assert (and (= hook-count 1) hook-after-admit-p
+                                   (equal hook-admission '(nil :closing)))
+                              "one later hook runs outside the lock after publication is claimed")
+                 (test-assert (eq (job-state job)
+                                  (if (eq contender :cancellation) :aborted :completed))
+                              "the competing transition determines terminal state"))
+            (tests--gate-open admission-release)
+            (tests--gate-open body-release)
+            (when admission-thread (join-thread admission-thread))
+            (when cancellation-thread (join-thread cancellation-thread)))))))
+  nil)
+
 (defun run-tests ()
   "Run every cl-jobpond regression test."
   (setf *test-count* 0)
@@ -1666,6 +1820,8 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
   (tests--cancellation-before-body-entry)
   (tests--late-completion-downgrade)
   (tests--terminal-result-hook)
+  (tests--host-admission)
+  (tests--host-admission-races)
   (tests--pool-deadline)
   (tests--job-deadline)
   (tests--await-timeout)

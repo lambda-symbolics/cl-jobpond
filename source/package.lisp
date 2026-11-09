@@ -32,6 +32,7 @@
            #:job-await
            #:job-await-any
            #:job-cancel
+           #:job-call-with-admission
            #:job-cancellation-reason
            #:job-cancellation-requested-p
            #:job-check-cancellation

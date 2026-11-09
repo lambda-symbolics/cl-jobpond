@@ -1,5 +1,28 @@
 (in-package #:cl-jobpond)
 
+(defun job-call-with-admission (job predicate)
+  "Call PREDICATE only while JOB can admit work, returning its values.
+
+The lifecycle check and predicate run atomically with cancellation and terminal
+publication. Return (values NIL :NOT-RUNNING) unless JOB is running, or
+(values NIL :CLOSING) when cancellation or publication has claimed it.
+PREDICATE takes no arguments and owns the host's admission decision and commit;
+it may reject without changing anything. Its errors propagate without claiming
+publication or changing the library lifecycle, and the lifecycle lock is released.
+
+Keep the predicate bounded: it must not wait for work, invoke another operation
+on JOB, or acquire a lock whose owner can call back into JOB. Host locks must
+always be acquired after admission. This operation does not claim terminal
+publication; :TERMINAL-RESULT-FUNCTION runs later, outside the lifecycle lock."
+  (with-lock-held ((job--lock job))
+    (cond
+      ((not (eq (job-state job) :running))
+       (values nil :not-running))
+      ((or (job-cancellation-reason job) (job--publication-claimed-p job))
+       (values nil :closing))
+      (t
+       (funcall predicate)))))
+
 ;;;; -- Terminal Retention --
 
 (defun job-pool--retain-terminal-locked (pool job)
