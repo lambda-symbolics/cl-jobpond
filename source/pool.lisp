@@ -233,6 +233,17 @@
     :reader        job-root-identifier
     :type          (or null string)
     :documentation "The identifier naming the tree this job belongs to, or NIL.")
+   (parent-job
+    :initarg       :parent-job
+    :initform      nil
+    :accessor      job-parent-job
+    :type          (or null job)
+    :documentation "The job whose cancellation governs this job, or NIL.")
+   (child-jobs
+    :initform      nil
+    :accessor      job--child-jobs
+    :type          list
+    :documentation "Jobs explicitly linked below this job for cross-pool cancellation.")
    (body-function
     :initarg       :body-function
     :reader        job--body-function

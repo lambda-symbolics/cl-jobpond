@@ -61,40 +61,43 @@ is nothing left to cancel in them."
           (member identifier (job-owner-identifiers job) :test #'string=)))
    (job-pool-list-jobs pool)))
 
+(defun job--linked-descendants (job)
+  "Return live jobs linked below JOB, including descendants in other pools."
+  (let ((children (with-lock-held ((job--lock job))
+                    (copy-list (job--child-jobs job)))))
+    (mapcan (lambda (child)
+              (cons child (job--linked-descendants child)))
+            (remove-if #'job-terminal-p children))))
+
 (defun job-cancel (job &key (reason :cancelled) cascade-p)
-  "Request cancellation of JOB for REASON and return T when this call accepted it.
+  "Cancel JOB and mark its complete subtree before queued hooks run."
+  (let* ((same-pool (and cascade-p
+                         (job-pool-descendant-jobs (job-pool job)
+                                                   (job-identifier job))))
+         (linked    (and cascade-p (job--linked-descendants job)))
+         (targets   (remove-duplicates (cons job (append same-pool linked))
+                                       :test #'eq))
+         (accepted  nil))
+    (dolist (target targets)
+      (when (job--cancel-one target reason :publish-queued-p nil)
+        (push target accepted)))
+    (dolist (target accepted)
+      (job--publish-cancelled-queued target reason))
+    (values (member job accepted :test #'eq)
+            (nreverse (remove job accepted :test #'eq)))))
 
-With CASCADE-P, every live descendant of JOB is cancelled too, and the
-descendants this call accepted are returned as a second value. JOB is cancelled
-first, so a body that spawns children stops adding to the subtree before the
-subtree is walked. A descendant admitted after the walk is not reached, so a
-caller that must guarantee an empty subtree cancels and then re-checks.
+(defun job--publish-cancelled-queued (job reason)
+  "Publish JOB after its cancellation subtree has been marked."
+  (when (with-lock-held ((job--lock job))
+          (and (eq (job-state job) :queued)
+               (job-cancellation-reason job)))
+    (job--publish-terminal
+     job :aborted nil
+     :report      (format nil "Job ~A was ~(~A~) before it started."
+                          (job-identifier job) reason))))
 
-Cancellation is first-writer: the first accepted request records REASON, and
-later requests return NIL rather than recording a second reason or interrupting
-a second time. A job that is already terminal, or that has claimed its terminal
-publication, is never cancelled.
-
-A queued job leaves the pool queue and publishes :ABORTED immediately, because no
-worker will ever pick it up. When JOB-INTERRUPT-ON-CANCELLATION-P returns true, a
-running job is interrupted on its worker thread with a closure guarded by
-JOB--CANCELLATION-INTERRUPT-APPLICABLE-P, so a delayed interrupt cannot strike
-whichever job that worker runs next. Otherwise its body must stop cooperatively.
-
-An interrupt is best effort. A body that blocks where the host cannot deliver
-interrupts stops at its next JOB-CHECK-CANCELLATION or JOB-REPORT-PROGRESS call
-instead."
-  (let ((accepted-p (job--cancel-one job reason))
-        (cascaded   nil))
-    (when cascade-p
-      (dolist (descendant (job-pool-descendant-jobs (job-pool job)
-                                                    (job-identifier job)))
-        (when (job--cancel-one descendant reason)
-          (push descendant cascaded))))
-    (values accepted-p (nreverse cascaded))))
-
-(defun job--cancel-one (job reason)
-  "Request cancellation of exactly JOB for REASON, ignoring any descendants."
+(defun job--cancel-one (job reason &key (publish-queued-p t))
+  "Request cancellation of exactly JOB for REASON, ignoring descendants."
   (let ((pool      (job-pool job))
         (thread    nil)
         (run-token nil)
@@ -114,13 +117,8 @@ instead."
         (setf (job-pool--queue pool)
               (remove job (job-pool--queue pool) :test #'eq))
         (jobpond--condition-broadcast (job-pool--condition-variable pool)))
-      (when queued-p
-        (job--publish-terminal
-         job
-         :aborted
-         nil
-         :report (format nil "Job ~A was ~(~A~) before it started."
-                         (job-identifier job) reason)))
+      (when (and publish-queued-p queued-p)
+        (job--publish-cancelled-queued job reason))
       (when (and thread run-token (thread-alive-p thread)
                  (job-interrupt-on-cancellation-p job))
         (interrupt-thread

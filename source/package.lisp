@@ -50,6 +50,7 @@
            #:job-not-found-identifier
            #:job-owner-identifiers
            #:job-payload
+           #:job-parent-job
            #:job-pool
            #:job-pool-active-count
            #:job-pool-add-listener

@@ -98,6 +98,7 @@ reserving names and terminal retention can evict a job without freeing a name."
            :payload                  (getf entry :payload)
            :owner-identifiers        (getf entry :owner-identifiers)
            :root-identifier          (getf entry :root-identifier)
+             :parent-job             (getf entry :parent-job)
            :body-function            (getf entry :function)
            :terminal-result-function (getf entry :terminal-result-function)
            :inline-only-p            (getf entry :inline-only-p)
@@ -147,6 +148,8 @@ JOB-POOL-CLOSED without changing the pool."
                            (job-pool--entry-owner-identifiers entry)
                            :root-identifier
                            (job-pool--entry-root-identifier entry)
+                           :parent-job
+                           (getf entry :parent-job)
                            :initargs (job-pool--entry-initargs entry)
                            :terminal-result-function
                            (job-pool--entry-terminal-result-function entry)
@@ -193,6 +196,10 @@ JOB-POOL-CLOSED without changing the pool."
                    (remove-if #'job-inline-only-p jobs)))
       (dolist (job jobs)
         (setf (gethash (job-identifier job) (job-pool--jobs pool)) job))
+      (dolist (job jobs)
+        (when (job-parent-job job)
+          (with-lock-held ((job--lock (job-parent-job job)))
+            (push job (job--child-jobs (job-parent-job job))))))
       (incf (job-pool--live-count pool) count)
       (jobpond--condition-broadcast (job-pool--condition-variable pool)))
     (job-pool--ensure-workers pool)
@@ -201,6 +208,7 @@ JOB-POOL-CLOSED without changing the pool."
 
 (defun job-pool-submit (pool function &key name payload owner-identifiers
                                         root-identifier
+                                          parent-job
                                         terminal-result-function
                                         inline-only-p
                                         maximum-runtime-milliseconds)
@@ -216,6 +224,7 @@ signalling any other error publishes :FAILED with a bounded condition report."
                       :payload                  payload
                       :owner-identifiers        owner-identifiers
                       :root-identifier          root-identifier
+                        :parent-job             parent-job
                       :terminal-result-function terminal-result-function
                       :inline-only-p            inline-only-p
                       :maximum-runtime-milliseconds
