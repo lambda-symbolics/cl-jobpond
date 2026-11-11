@@ -85,10 +85,11 @@ it. Its values pass through unchanged; lifecycle rejection returns =nil= and
 =:not-running= or =:closing=.
 
 Keep the predicate bounded and acquire host locks only inside admission, in a
-consistent order. It must not wait for work or call job operations. Predicate
-conditions propagate with the lifecycle lock released; the host owns any changes
-it made before signalling. Admission does not claim terminal publication. The
-later =:terminal-result-function= runs outside the lifecycle lock.
+consistent order. The predicate runs under the recursive ownership lock, with
+the lifecycle lock released, so it can submit linked children. Waiting for jobs
+inside the predicate would block cancellation and publication. Predicate
+conditions propagate; the host owns any changes it made before signalling.
+The later =:terminal-result-function= runs outside both locks.
 
 * Progress
 
@@ -106,9 +107,11 @@ when a controller asked for cancellation.
 * Cancellation
 
 =job-cancel= is first-writer. The first accepted request records its reason;
-later requests return =nil=. A queued job leaves the queue and publishes
-=:aborted= immediately. A running job is interrupted on its worker thread by
-default.
+later requests return =nil= as the first value. Cancellation flags and queue
+removal are committed before the call returns. Interrupt delivery and queued
+=:aborted= publication run asynchronously, with every selected interrupt sent
+before queued terminal hooks run. Use =job-await= with an explicit timeout to
+wait for a result.
 
 Interrupts are best effort. A body blocked where the host cannot deliver them
 stops at its next =job-check-cancellation= or =job-report-progress= call.
@@ -127,8 +130,9 @@ For a body with its own cancellation polling, specialize
 (cl-jobpond:make-job-pool :job-class 'polling-job)
 #+END_SRC
 
-The method runs on the cancelling thread outside lifecycle locks. Return
-promptly without signalling, and keep the policy stable throughout the run.
+The method runs on the cancellation delivery thread outside lifecycle and
+ownership locks. Return promptly without signalling, and keep the policy stable
+throughout the run.
 The body must poll =job-cancellation-requested-p= or call
 =job-check-cancellation= at bounded intervals and unwind promptly, including
 during pool shutdown. No asynchronous interrupt is sent for this job.
@@ -206,11 +210,22 @@ workers.
 
 * Job trees
 
-A job may name its ancestors with =:owner-identifiers=, outermost first, and
-the tree it belongs to with =:root-identifier=. =job-pool-descendant-jobs=
-finds a whole subtree in one pass. =job-cancel= with =:cascade-p= cancels that
-subtree and returns the descendants it took. The job itself is cancelled
-first.
+Use =:parent-job= to link a child to its governing job, including across pools.
+Admission, subtree selection, and publication claims share one ownership lock.
+A closing or terminal parent refuses child admission with =job-aborted=.
+
+=job-cancel= with =:cascade-p t= returns two values: whether the root accepted
+cancellation, and the selected live descendants. The descendant list includes
+jobs already cancelling or publishing, so callers can budget their own waits.
+A root may become terminal before its descendants. Cross-pool links preserve
+visibility through terminal intermediate jobs until the whole branch settles,
+then release both child and parent references. =job-parent-job= therefore
+reports a current ownership link, rather than permanent ancestry.
+
+=:owner-identifiers= records ancestor names, outermost first, and
+=:root-identifier= records the tree name. =job-pool-descendant-jobs= selects live
+jobs in one pool by these names; cascading cancellation also includes this
+selection. Use =:parent-job= for atomic admission and cross-pool ownership.
 
 * Running a job on a chosen thread
 

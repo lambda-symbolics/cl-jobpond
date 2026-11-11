@@ -8,20 +8,20 @@ publication. Return (values NIL :NOT-RUNNING) unless JOB is running, or
 (values NIL :CLOSING) when cancellation or publication has claimed it.
 PREDICATE takes no arguments and owns the host's admission decision and commit;
 it may reject without changing anything. Its errors propagate without claiming
-publication or changing the library lifecycle, and the lifecycle lock is released.
+publication or changing the library lifecycle.
 
-Keep the predicate bounded: it must not wait for work, invoke another operation
-on JOB, or acquire a lock whose owner can call back into JOB. Host locks must
-always be acquired after admission. This operation does not claim terminal
-publication; :TERMINAL-RESULT-FUNCTION runs later, outside the lifecycle lock."
-  (with-lock-held ((job--lock job))
-    (cond
-      ((not (eq (job-state job) :running))
-       (values nil :not-running))
-      ((or (job-cancellation-reason job) (job--publication-claimed-p job))
-       (values nil :closing))
-      (t
-       (funcall predicate)))))
+The recursive ownership lock protects the check and predicate; the lifecycle
+lock is released before the predicate, so it may submit linked children. Keep
+it bounded, without waiting for jobs, and acquire host locks after admission in
+a consistent order. Terminal hooks run later, outside both locks."
+  (bordeaux-threads:with-recursive-lock-held (*job-tree-lock*)
+    (with-lock-held ((job--lock job))
+      (cond
+        ((not (eq (job-state job) :running))
+         (return-from job-call-with-admission (values nil :not-running)))
+        ((or (job-cancellation-reason job) (job--publication-claimed-p job))
+         (return-from job-call-with-admission (values nil :closing)))))
+    (funcall predicate)))
 
 ;;;; -- Terminal Retention --
 
@@ -136,14 +136,15 @@ terminal record actually contains. See JOB--RESOLVE-TERMINAL-RECORD."
         (final-result               result)
         (final-report               report)
         (event                      nil))
-    (with-lock-held ((job--lock job))
-      (unless (or (job--terminal-state-p (job-state job))
-                  (job--publication-claimed-p job))
-        (setf reason (job-cancellation-reason job))
-        (when reason
-          (setf state :aborted))
-        (setf (job--publication-claimed-p job) t
-              publish-p t)))
+    (bordeaux-threads:with-recursive-lock-held (*job-tree-lock*)
+      (with-lock-held ((job--lock job))
+        (unless (or (job--terminal-state-p (job-state job))
+                    (job--publication-claimed-p job))
+          (setf reason (job-cancellation-reason job))
+          (when reason
+            (setf state :aborted))
+          (setf (job--publication-claimed-p job) t
+                publish-p t))))
     (when publish-p
       (handler-case
           (progn
@@ -175,6 +176,7 @@ terminal record actually contains. See JOB--RESOLVE-TERMINAL-RECORD."
               (job-pool--retain-terminal-locked (job-pool job) job)
               (jobpond--condition-broadcast (job--condition-variable job))
               (job--wake-waiters-locked job))
+            (job--prune-settled-branch job)
             (job-pool-emit (job-pool job) :job-lifecycle event))
         (serious-condition (condition)
           (job--force-terminal-failure job condition condition))))
@@ -213,6 +215,7 @@ terminal, so a lost broadcast cannot strand them."
     (with-lock-held ((job--lock job))
       (jobpond--condition-broadcast (job--condition-variable job))
       (job--wake-waiters-locked job))
+    (job--prune-settled-branch job)
     (when event
       (job-pool-emit (job-pool job) :job-lifecycle event))
     nil))

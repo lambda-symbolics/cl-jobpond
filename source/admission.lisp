@@ -162,46 +162,58 @@ JOB-POOL-CLOSED without changing the pool."
          (jobs  nil))
     (when (zerop count)
       (return-from job-pool-submit-batch nil))
-    (with-lock-held ((job-pool--lock pool))
-      (when (or (job-pool--shutdown-p pool)
-                (not (eq (job-pool-lifecycle-state pool) :open)))
-        (error 'job-pool-closed
-               :message         (format nil "Pool ~A is not accepting jobs."
-                                        (job-pool-name pool))
-               :lifecycle-state (job-pool-lifecycle-state pool)))
-      (when (> count (job-pool-maximum-batch-size pool))
-        (error 'job-pool-capacity-exceeded
-               :message         (format nil "Pool ~A admits at most ~D jobs per batch."
-                                        (job-pool-name pool)
-                                        (job-pool-maximum-batch-size pool))
-               :limit-kind      :batch-size
-               :limit           (job-pool-maximum-batch-size pool)
-               :requested-count count
-               :live-count      (job-pool--live-count pool)))
-      (when (> (+ (job-pool--live-count pool) count)
-               (job-pool-maximum-live-jobs pool))
-        (error 'job-pool-capacity-exceeded
-               :message         (format nil "Pool ~A admits at most ~D live jobs."
-                                        (job-pool-name pool)
-                                        (job-pool-maximum-live-jobs pool))
-               :limit-kind      :live-jobs
-               :limit           (job-pool-maximum-live-jobs pool)
-               :requested-count count
-               :live-count      (job-pool--live-count pool)))
-      (setf jobs (mapcar (lambda (entry)
-                           (job-pool--create-job-locked pool entry))
-                         normalized)
-            (job-pool--queue pool)
-            (nconc (job-pool--queue pool)
-                   (remove-if #'job-inline-only-p jobs)))
-      (dolist (job jobs)
-        (setf (gethash (job-identifier job) (job-pool--jobs pool)) job))
-      (dolist (job jobs)
-        (when (job-parent-job job)
-          (with-lock-held ((job--lock (job-parent-job job)))
-            (push job (job--child-jobs (job-parent-job job))))))
-      (incf (job-pool--live-count pool) count)
-      (jobpond--condition-broadcast (job-pool--condition-variable pool)))
+    (bordeaux-threads:with-recursive-lock-held (*job-tree-lock*)
+      ;; Check parents before taking the pool lock. Publication uses job -> pool.
+      (dolist (entry normalized)
+        (let ((parent (getf entry :parent-job)))
+          (when parent
+            (with-lock-held ((job--lock parent))
+              (when (or (job--terminal-state-p (job-state parent))
+                        (job--publication-claimed-p parent)
+                        (job-cancellation-reason parent))
+                (error 'job-aborted
+                       :message    "The parent no longer admits descendants."
+                       :identifier (job-identifier parent)
+                       :reason     (or (job-cancellation-reason parent) :cancelled)))))))
+      (with-lock-held ((job-pool--lock pool))
+       (when (or (job-pool--shutdown-p pool)
+                 (not (eq (job-pool-lifecycle-state pool) :open)))
+         (error 'job-pool-closed
+                :message         (format nil "Pool ~A is not accepting jobs."
+                                         (job-pool-name pool))
+                :lifecycle-state (job-pool-lifecycle-state pool)))
+       (when (> count (job-pool-maximum-batch-size pool))
+         (error 'job-pool-capacity-exceeded
+                :message         (format nil "Pool ~A admits at most ~D jobs per batch."
+                                         (job-pool-name pool)
+                                         (job-pool-maximum-batch-size pool))
+                :limit-kind      :batch-size
+                :limit           (job-pool-maximum-batch-size pool)
+                :requested-count count
+                :live-count      (job-pool--live-count pool)))
+       (when (> (+ (job-pool--live-count pool) count)
+                (job-pool-maximum-live-jobs pool))
+         (error 'job-pool-capacity-exceeded
+                :message         (format nil "Pool ~A admits at most ~D live jobs."
+                                         (job-pool-name pool)
+                                         (job-pool-maximum-live-jobs pool))
+                :limit-kind      :live-jobs
+                :limit           (job-pool-maximum-live-jobs pool)
+                :requested-count count
+                :live-count      (job-pool--live-count pool)))
+       (setf jobs (mapcar (lambda (entry)
+                            (job-pool--create-job-locked pool entry))
+                          normalized)
+             (job-pool--queue pool)
+             (nconc (job-pool--queue pool)
+                    (remove-if #'job-inline-only-p jobs)))
+       (dolist (job jobs)
+         (setf (gethash (job-identifier job) (job-pool--jobs pool)) job))
+       (dolist (job jobs)
+         (when (job-parent-job job)
+           (push job (job--child-jobs (job-parent-job job)))))
+       (incf (job-pool--live-count pool) count)
+       (jobpond--condition-broadcast (job-pool--condition-variable pool))))
     (job-pool--ensure-workers pool)
     (job-pool--ensure-monitor pool)
     jobs))

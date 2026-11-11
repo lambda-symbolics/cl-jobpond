@@ -56,6 +56,11 @@
 (defvar *run-token-index* 0
   "The monotonically increasing source of unique run tokens.")
 
+(defvar *job-tree-lock* (bordeaux-threads:make-recursive-lock "cl-jobpond ownership")
+  "Serialize admission, cancellation selection, and branch pruning across pools.
+Acquire this lock before lifecycle locks, then pool locks. Terminal hooks and
+job waits run outside it. Admission predicates may recursively submit.")
+
 
 ;;;; -- Classes --
 
@@ -152,6 +157,11 @@
     :initform      nil
     :accessor      job-pool--monitor-thread
     :documentation "The single deadline monitor thread, or NIL.")
+   (cancellation-threads
+    :initform      nil
+    :accessor      job-pool--cancellation-threads
+    :type          list
+    :documentation "Delivery threads retaining unfinished cancellation publication.")
    (shutdown-p
     :initform      nil
     :accessor      job-pool--shutdown-p
@@ -528,10 +538,11 @@ add or remove listeners without deadlocking."
         collect job))
 
 (defun job-pool--collect-threads-locked (pool)
-  "Return POOL's monitor and reusable worker threads while its lock is held."
+  "Return all POOL's runtime threads while its lock is held."
   (remove nil
-          (cons (job-pool--monitor-thread pool)
-                (copy-list (job-pool--worker-threads pool)))))
+          (append (job-pool--cancellation-threads pool)
+                  (cons (job-pool--monitor-thread pool)
+                        (copy-list (job-pool--worker-threads pool))))))
 
 (defun job-pool-list-jobs (pool)
   "Return POOL's live and retained jobs ordered by admission index."

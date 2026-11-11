@@ -161,13 +161,18 @@
       (cl-jobpond:completion-subscription-close subscription)
       (job-pool-close pool)))
   (let* ((pool         (make-job-pool :maximum-concurrency 1))
-         (subscription (cl-jobpond:make-completion-subscription))
+         (wake         (tests--make-gate))
+         (subscription (cl-jobpond:make-completion-subscription
+                        :wakeup (lambda (subscription)
+                                  (declare (ignore subscription))
+                                  (tests--gate-open wake))))
          (job          (job-pool-submit pool (lambda (job) (declare (ignore job)) "never")
                                        :inline-only-p t)))
     (unwind-protect
          (progn
            (cl-jobpond:completion-subscription-watch subscription job :id "cancelled-uuid")
            (job-cancel job :reason ':requested)
+           (coordination--check (tests--gate-await wake))
            (let ((event (getf (first (cl-jobpond:completion-subscription-collect subscription))
                              :payload)))
              (coordination--check (eq ':cancelled (getf event :outcome)))

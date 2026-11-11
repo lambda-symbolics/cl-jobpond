@@ -255,9 +255,12 @@ ownership is released here and the pool becomes :CLOSED once no thread remains."
   (let ((monitor (job-pool--monitor-thread pool)))
     (when (and monitor (not (thread-alive-p monitor)))
       (setf (job-pool--monitor-thread pool) nil)))
+  (setf (job-pool--cancellation-threads pool)
+        (remove-if-not #'thread-alive-p (job-pool--cancellation-threads pool)))
   (when (and (eq (job-pool-lifecycle-state pool) :closing)
              (null (job-pool--close-owner pool))
              (null (job-pool--worker-threads pool))
+             (null (job-pool--cancellation-threads pool))
              (null (job-pool--monitor-thread pool)))
     (setf (job-pool-lifecycle-state pool) :closed
           (job-pool--active-count pool) 0)
@@ -313,8 +316,8 @@ owner through the same shutdown, so concurrent close calls agree on one answer."
 (defun job-pool-close (pool)
   "Cancel every job of POOL, stop its threads, and report complete shutdown.
 
-Return T only when the pool reached :CLOSED, which means no worker and no monitor
-thread of this pool is still running. Return NIL when a thread outlived
+Return T only when the pool reached :CLOSED, with no worker, monitor or
+cancellation delivery thread running. Return NIL when a thread outlived
 *SHUTDOWN-TIMEOUT-SECONDS*, in which case the pool stays :CLOSING and a later
 call may finish the job.
 
@@ -332,33 +335,40 @@ the close owner and the others wait for its result."
         (deadline (+ (get-internal-real-time)
                      (* *shutdown-timeout-seconds*
                         internal-time-units-per-second))))
-    (with-lock-held ((job-pool--lock pool))
-      (job-pool--reap-dead-threads-locked pool)
-      (case (job-pool-lifecycle-state pool)
-        (:closed
-         (return-from job-pool-close t))
-        (:closing
-         (let ((owner (job-pool--close-owner pool)))
-           (unless (and owner
-                        (not (eq owner (current-thread)))
-                        (thread-alive-p owner))
-             (setf owner-p t
-                   (job-pool--close-owner pool) (current-thread)
-                   jobs (job-pool--collect-jobs-locked pool)
-                   threads (job-pool--collect-threads-locked pool)))))
-        (otherwise
-         (setf owner-p t
-               (job-pool--close-owner pool) (current-thread)
-               (job-pool-lifecycle-state pool) :closing
-               (job-pool--shutdown-p pool) t
-               (job-pool--queue pool) nil
-               jobs (job-pool--collect-jobs-locked pool)
-               threads (job-pool--collect-threads-locked pool))
-         (jobpond--condition-broadcast (job-pool--condition-variable pool)))))
+    (bordeaux-threads:with-recursive-lock-held (*job-tree-lock*)
+      (with-lock-held ((job-pool--lock pool))
+       (job-pool--reap-dead-threads-locked pool)
+       (case (job-pool-lifecycle-state pool)
+         (:closed
+          (return-from job-pool-close t))
+         (:closing
+          (let ((owner (job-pool--close-owner pool)))
+            (unless (and owner
+                         (not (eq owner (current-thread)))
+                         (thread-alive-p owner))
+              (setf owner-p t
+                    (job-pool--close-owner pool) (current-thread)
+                    jobs (job-pool--collect-jobs-locked pool)
+                    threads (job-pool--collect-threads-locked pool)))))
+         (otherwise
+          (setf owner-p t
+                (job-pool--close-owner pool) (current-thread)
+                (job-pool-lifecycle-state pool) :closing
+                (job-pool--shutdown-p pool) t
+                (job-pool--queue pool) nil
+                jobs (job-pool--collect-jobs-locked pool)
+                threads (job-pool--collect-threads-locked pool))
+          (jobpond--condition-broadcast (job-pool--condition-variable pool))))))
     (unless owner-p
       (return-from job-pool-close (job-pool--await-close-owner pool deadline)))
     (dolist (job jobs)
       (job-cancel job :reason :shutdown))
+    ;; Cancellation can register delivery owners after the initial snapshot.
+    (bordeaux-threads:with-recursive-lock-held (*job-tree-lock*)
+      (with-lock-held ((job-pool--lock pool))
+        (setf threads (remove-duplicates
+                       (append threads (job-pool--collect-threads-locked pool))
+                       :test #'eq))))
     (loop
       (let ((live (job-pool--live-threads threads)))
         (when (or (null live) (>= (get-internal-real-time) deadline))
@@ -378,6 +388,8 @@ the close owner and the others wait for its result."
               (if (member (job-pool--monitor-thread pool) live :test #'eq)
                   (job-pool--monitor-thread pool)
                   nil)
+              (job-pool--cancellation-threads pool)
+              (intersection live (job-pool--cancellation-threads pool) :test #'eq)
               (job-pool-lifecycle-state pool) (if live :closing :closed)
               (job-pool--close-owner pool) nil
               (job-pool--active-count pool)
@@ -400,15 +412,14 @@ JOB-POOL-DETACH-REFUSED rather than losing track of running work."
              :message (format nil "Pool ~A must close before it can detach."
                               (job-pool-name pool))
              :reason  :not-closed))
-    (when (or (some #'thread-alive-p (job-pool--worker-threads pool))
-              (let ((monitor (job-pool--monitor-thread pool)))
-                (and monitor (thread-alive-p monitor))))
+    (when (some #'thread-alive-p (job-pool--collect-threads-locked pool))
       (error 'job-pool-detach-refused
              :message (format nil "Pool ~A cannot detach while its threads live."
                               (job-pool-name pool))
              :reason  :threads-alive))
     (setf (job-pool--worker-threads pool) nil
           (job-pool--monitor-thread pool) nil
+          (job-pool--cancellation-threads pool) nil
           (job-pool--queue pool) nil
           (job-pool--close-owner pool) nil
           (job-pool--active-count pool) 0
