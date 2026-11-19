@@ -32,7 +32,7 @@
                  (uiop:symbol-call '#:cl-jobpond/tests '#:run-tests)))
 
 (asdf:defsystem #:cl-jobpond/durable-state
-  :description "Portable transactional state shared by optional schedules and mailboxes"
+  :description "Portable transactional state, used for optional schedules and mailboxes"
   :depends-on  (#:cl-jobpond)
   :components  ((:file "source/durable-state")))
 
