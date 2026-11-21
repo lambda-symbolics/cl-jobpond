@@ -151,7 +151,8 @@
            (coordination--check (stringp (cl-jobpond:completion-subscription-error subscription)))
            (coordination--check (null persisted))
            (setf fail nil)
-           (coordination--check (= 1 (cl-jobpond:completion-subscription-refresh subscription)))
+           (coordination--check (null (cl-jobpond:completion-subscription-claim subscription)))
+           (coordination--check (null (completion-tests--messages subscription)))
            (let* ((record (first (cl-jobpond:completion-subscription-collect subscription)))
                   (event  (getf record :payload)))
              (coordination--check (eq ':failure (getf event :outcome)))
@@ -354,6 +355,24 @@
       (cl-jobpond:completion-subscription-close subscription)
       (job-pool-close pool))))
 
+(defun completion-tests--claim ()
+  "Distinguish an empty selection from exact and FIFO claims."
+  (let ((subscription (cl-jobpond:make-completion-subscription)))
+    (dolist (id '("one" "two" "three" "four"))
+      (cl-jobpond:completion-subscription-replay subscription (completion-tests--snapshot id ':completed)))
+    (coordination--check (null (cl-jobpond:completion-subscription-claim subscription :ids nil)))
+    (coordination--fails ':not-found
+      (cl-jobpond:completion-subscription-claim subscription :ids '("missing")))
+    (flet ((ids (records) (mapcar (lambda (record) (getf record :id)) records)))
+      (coordination--check
+       (equal '("three" "two")
+              (ids (cl-jobpond:completion-subscription-claim subscription
+                     :ids '("three" "two" "one") :limit 2))))
+      (coordination--fails ':not-queued
+        (cl-jobpond:completion-subscription-claim subscription :ids '("three")))
+      (coordination--check
+       (equal '("one" "four") (ids (cl-jobpond:completion-subscription-claim subscription)))))))
+
 (defun run-completion-tests ()
   "Run completion publication, concurrency, restore and failure checks."
   (let ((*coordination-checks* 0))
@@ -364,5 +383,6 @@
     (completion-tests--attachment)
     (completion-tests--forget)
     (completion-tests--retired-refresh)
+    (completion-tests--claim)
     (format t "~&~D completion assertions passed.~%" *coordination-checks*))
   nil)

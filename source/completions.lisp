@@ -6,7 +6,7 @@
           completion-subscription-mailbox completion-subscription-error
           completion-subscription-attach completion-subscription-watch
           completion-subscription-refresh completion-subscription-replay
-          completion-subscription-collect completion-subscription-ack
+          completion-subscription-claim completion-subscription-collect completion-subscription-ack
           completion-subscription-forget completion-subscription-snapshot
           completion-subscription-close))
 
@@ -223,6 +223,23 @@ for an already retained identity is refused rather than silently overwritten."
     (unless duplicate (completion-subscription--wake subscription))
     (values event duplicate)))
 
+(defun completion-subscription-claim (subscription &key (limit 16) (ids nil ids-p))
+  "Claim queued delivery records without refreshing watches.
+With IDS supplied, claim at most LIMIT IDs in the given order. An empty list
+claims nothing. A missing or nonqueued ID signals after any earlier claims.
+Without IDS, claim up to LIMIT records in enqueue order. Persist caller delivery
+proof before ACK."
+  (unless (typep limit '(integer 1 *)) (durable-state--fail ':limit))
+  (let ((mailbox (completion-subscription-mailbox subscription)))
+    (if ids-p
+        (loop for id in ids
+              repeat limit
+              do (when (null id) (durable-state--fail ':not-found id))
+              collect (mailbox-receive mailbox :receiver "completion" :id id))
+        (loop repeat limit
+              collect (or (mailbox-receive mailbox :receiver "completion")
+                          (loop-finish))))))
+
 (defun completion-subscription-collect (subscription &key (limit 16))
   "Claim at most LIMIT queued delivery records in enqueue order as one batch.
 Records contain ID, TOKEN and PAYLOAD (the complete event). Persist caller delivery
@@ -230,10 +247,7 @@ proof before ACK. Repeated collection never implicitly redelivers claimed record
 Reconcile current watches first so a failed producer callback can be retried."
   (unless (typep limit '(integer 1 *)) (durable-state--fail ':limit))
   (completion-subscription-refresh subscription)
-  (loop repeat limit
-        collect (or (mailbox-receive (completion-subscription-mailbox subscription)
-                                     :receiver "completion")
-                    (loop-finish))))
+  (completion-subscription-claim subscription :limit limit))
 
 (defun completion-subscription-ack (subscription &key id token result)
   "Acknowledge ID and TOKEN after caller delivery proof is durable."

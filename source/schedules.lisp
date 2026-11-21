@@ -3,8 +3,8 @@
 ;;;; -- Durable Wakeup State Machine --
 
 (export '(scheduler make-scheduler scheduler-add scheduler-wake scheduler-event
-          scheduler-claim scheduler-ack scheduler-resolve scheduler-cancel
-          scheduler-snapshot scheduler-next-time scheduler-close))
+          scheduler-claim scheduler-claim-next scheduler-ack scheduler-resolve scheduler-cancel
+          scheduler-snapshot scheduler-pending-p scheduler-next-time scheduler-close))
 
 (defclass scheduler (durable-state) ()
   (:documentation "Durable time, interval and event wakeups without an execution thread."))
@@ -249,6 +249,16 @@ due occurrence, refusing the entire transaction if retention capacity is exceede
                  (when wakeup (push wakeup new))))))
          (nreverse new))))))
 
+(defun scheduler--first-pending (data)
+  "Find the first pending wakeup in enqueue order."
+  (find ':pending (getf data :wakeups) :key (lambda (wakeup) (getf wakeup :state))))
+
+(defun scheduler--claim-wakeup (data wakeup)
+  "Set WAKEUP's claim and token on the transaction draft."
+  (setf (getf wakeup :state) ':claimed
+        (getf wakeup :token) (durable-state--token data))
+  wakeup)
+
 (defun scheduler-claim (scheduler &key id version)
   "Atomically claim a pending wakeup, returning its record with a new persisted TOKEN.
 ID and VERSION optionally restrict the claim. A stale expected version is refused.
@@ -259,15 +269,20 @@ explicitly RESOLVE an uncertain outcome; no automatic reexecution occurs."
    (lambda (data)
      (scheduler--open data)
      (let ((wakeup (if id (durable-state--record data :wakeups id)
-                       (find ':pending (getf data :wakeups) :key (lambda (w) (getf w :state))))))
+                       (scheduler--first-pending data))))
        (when wakeup
          (when (and version (not (equal version (getf wakeup :version))))
            (durable-state--fail ':stale-version id))
          (unless (eq (getf wakeup :state) ':pending)
            (durable-state--fail ':not-pending (getf wakeup :id)))
-         (setf (getf wakeup :state) ':claimed
-               (getf wakeup :token) (durable-state--token data))
-         wakeup)))))
+         (scheduler--claim-wakeup data wakeup))))))
+
+(defun scheduler-claim-next (scheduler)
+  "Claim the first pending wakeup. Return NIL without writing if empty or closed."
+  (durable-state--transaction
+   scheduler
+   (lambda (data) (scheduler--claim-wakeup data (scheduler--first-pending data)))
+   :when (lambda (data) (and (not (getf data :closed)) (scheduler--first-pending data)))))
 
 (defun scheduler-ack (scheduler &key id token (outcome ':completed) result)
   "Acknowledge a claimed/unknown outcome using its current TOKEN.
@@ -324,12 +339,22 @@ caller must decide whether repeating externally visible effects is safe."
              (setf (getf wakeup :state) ':cancelled))))
        schedule))))
 
+(defun scheduler-pending-p (scheduler)
+  "Return true if SCHEDULER has a pending wakeup."
+  (with-lock-held ((durable-state-lock scheduler))
+    (unless (durable-state--healthy-p scheduler) (durable-state--fail ':uncertain-store))
+    (not (null (scheduler--first-pending (durable-state-data scheduler))))))
+
 (defun scheduler-next-time (scheduler)
   "Return the earliest active time wakeup, or NIL when only events/no work remain."
-  (let ((times (loop for schedule in (getf (scheduler-snapshot scheduler) :schedules)
-                     when (and (not (getf schedule :cancelled)) (getf schedule :next))
-                       collect (getf schedule :next))))
-    (when times (reduce #'min times))))
+  (with-lock-held ((durable-state-lock scheduler))
+    (unless (durable-state--healthy-p scheduler) (durable-state--fail ':uncertain-store))
+    (loop for schedule in (getf (durable-state-data scheduler) :schedules)
+          for time = (getf schedule :next)
+          when (and time (not (getf schedule :cancelled)))
+            minimize time into earliest
+            and count t into timed
+          finally (return (when (plusp timed) earliest)))))
 
 (defun scheduler-close (scheduler)
   "Idempotently close admission and cancel pending work; claimed outcomes remain explicit."

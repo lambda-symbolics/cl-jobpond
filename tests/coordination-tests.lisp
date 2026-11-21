@@ -109,6 +109,34 @@
       (coordination--check (null (cl-jobpond:scheduler-next-time scheduler)))))
   (coordination--fails ':snapshot (cl-jobpond:make-scheduler :snapshot '(:kind :scheduler :format 9))))
 
+(defun coordination--claim-next-tests ()
+  "Claim in enqueue order without writing on empty or closed schedulers."
+  (let* ((writes 0)
+         (scheduler (cl-jobpond:make-scheduler
+                     :store (lambda (snapshot) (declare (ignore snapshot)) (incf writes)))))
+    (coordination--check (null (cl-jobpond:scheduler-claim-next scheduler)))
+    (coordination--check (zerop writes))
+    (cl-jobpond:scheduler-claim scheduler)
+    (coordination--check (= 1 writes))
+    (cl-jobpond:scheduler-add scheduler :id "siblings" :version "v1" :at 0 :interval 1 :missed-policy ':all)
+    (cl-jobpond:scheduler-add scheduler :id "other" :version "v1" :at 1)
+    (cl-jobpond:scheduler-wake scheduler :now 1)
+    (let ((before writes))
+      (coordination--check (cl-jobpond:scheduler-pending-p scheduler))
+      (coordination--check (= before writes)))
+    (let ((claim (cl-jobpond:scheduler-claim-next scheduler)))
+      (coordination--check (equal '("siblings" "v1" (:time 0)) (getf claim :id)))
+      (cl-jobpond:scheduler-cancel scheduler :id "siblings")
+      (coordination--check (equal "other" (getf (cl-jobpond:scheduler-claim-next scheduler) :schedule))))
+    (coordination--check (not (cl-jobpond:scheduler-pending-p scheduler)))
+    (coordination--check (null (cl-jobpond:scheduler-next-time scheduler)))
+    (cl-jobpond:scheduler-close scheduler)
+    (let ((before writes))
+      (coordination--check (not (cl-jobpond:scheduler-pending-p scheduler)))
+      (coordination--check (null (cl-jobpond:scheduler-claim-next scheduler)))
+      (coordination--fails ':closed (cl-jobpond:scheduler-claim scheduler))
+      (coordination--check (= before writes)))))
+
 (defun coordination--mailbox-tests ()
   "Exercise bounded admission, ownership, recovery, waits and retained deduplication."
   (let ((persisted nil) (fail nil))
@@ -328,6 +356,7 @@
   "Run optional scheduling and mailbox behavioral checks."
   (let ((*coordination-checks* 0))
     (coordination--schedule-tests)
+    (coordination--claim-next-tests)
     (coordination--mailbox-tests)
     (coordination--concurrency-tests)
     (coordination--persistence-tests)

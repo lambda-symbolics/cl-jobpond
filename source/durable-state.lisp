@@ -89,13 +89,17 @@
     (unless (typep now '(integer 0 *)) (durable-state--fail ':clock))
     now))
 
-(defun durable-state--transaction (state function)
+(defun durable-state--transaction (state function &key ((:when guard)))
   "Commit FUNCTION's changes atomically; return its values after durable publication.
-FUNCTION receives an isolated copy. STORE runs under the lock and must not reenter.
+An optional read-only GUARD sees live data under the lock. If false, return NIL
+without copying or committing. FUNCTION receives an isolated copy.
+STORE runs under the lock and must not reenter.
 If STORE signals, the live state is unchanged; its external write outcome is owned
 by the store implementation, which must provide atomic replace semantics."
   (with-lock-held ((durable-state-lock state))
     (unless (durable-state--healthy-p state) (durable-state--fail ':uncertain-store))
+    (when (and guard (not (funcall guard (durable-state-data state))))
+      (return-from durable-state--transaction nil))
     (let* ((data    (durable-state--copy (durable-state-data state)))
            (results (multiple-value-list (funcall function data))))
       ;; Isolate newly inserted caller data and validate every returned value before persistence.
