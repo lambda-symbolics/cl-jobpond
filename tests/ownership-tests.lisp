@@ -15,17 +15,17 @@
       (with-test-pool (bridges :name "ownership bridges" :terminal-retention-limit 1)
         (with-test-pool (leaves :name "ownership leaves" :terminal-retention-limit 1
                                 :job-class 'tests--cooperative-job)
-          (let* ((root (job-pool-submit roots (constantly :root) :inline-only-p t))
+          (let* ((root   (job-pool-submit roots (constantly :root) :inline-only-p t))
                  (bridge (job-pool-submit bridges (constantly :bridge)
                                           :parent-job root :inline-only-p t))
-                 (leaf (job-pool-submit
-                        leaves
-                        (lambda (job)
-                          (declare (ignore job))
-                          (tests--gate-open started)
-                          (tests--gate-await release)
-                          :leaf)
-                        :parent-job bridge)))
+                 (leaf   (job-pool-submit
+                          leaves
+                          (lambda (job)
+                            (declare (ignore job))
+                            (tests--gate-open started)
+                            (tests--gate-await release)
+                            :leaf)
+                          :parent-job bridge)))
             (unwind-protect
                  (progn
                    (test-assert (tests--gate-await started) "the cross-pool leaf starts")
@@ -74,14 +74,14 @@
 
 (defun tests--prompt-cascade ()
   "Separate prompt cancellation from blocking queued hooks and running cleanup."
-  (let ((started (tests--make-gate))
-        (interrupted (tests--make-gate))
+  (let ((started         (tests--make-gate))
+        (interrupted     (tests--make-gate))
         (cleanup-release (tests--make-gate))
-        (hook-entered (tests--make-gate))
-        (hook-release (tests--make-gate))
+        (hook-entered    (tests--make-gate))
+        (hook-release    (tests--make-gate))
         (cancel-returned (tests--make-gate))
-        (selected nil)
-        (caller nil))
+        (selected        nil)
+        (caller          nil))
     (with-test-pool (roots :name "prompt cancellation roots")
       (with-test-pool (leaves :name "prompt cancellation leaves")
         (let* ((root (job-pool-submit
@@ -145,6 +145,7 @@
             (tests--gate-open cleanup-release)
             (when caller (join-thread caller))))))))
 
+
 ;;;; -- Admission Races --
 
 (defclass tests--admission-gated-job (cl-jobpond:job)
@@ -162,14 +163,14 @@
 
 (defun tests--admission-cancellation-race ()
   "A concurrent cascade includes an admission winner and rejects a later loser."
-  (let ((entered (tests--make-gate))
-        (release (tests--make-gate))
-        (admitted (tests--make-gate))
-        (cancel-started (tests--make-gate))
+  (let ((entered         (tests--make-gate))
+        (release         (tests--make-gate))
+        (admitted        (tests--make-gate))
+        (cancel-started  (tests--make-gate))
         (cancel-returned (tests--make-gate))
         (child nil) (selection nil) (submitter nil) (canceller nil))
     (with-test-pool (roots :name "admission race roots")
-      (with-test-pool (children :name "admission race children"
+      (with-test-pool (children :name      "admission race children"
                                 :job-class 'tests--admission-gated-job)
         (let ((root (job-pool-submit roots (constantly nil) :inline-only-p t)))
           (unwind-protect
@@ -219,11 +220,11 @@
 
 (defun tests--nested-admission ()
   "Admit a linked child inside the parent's admission transaction without inversion."
-  (let ((started (tests--make-gate))
-        (release (tests--make-gate))
+  (let ((started  (tests--make-gate))
+        (release  (tests--make-gate))
         (admitted (tests--make-gate))
         (runner nil) (child nil))
-    (with-test-pool (parents :name "nested admission parents"
+    (with-test-pool (parents :name      "nested admission parents"
                              :job-class 'tests--cooperative-job)
       (with-test-pool (children :name "nested admission children")
         (let ((parent (job-pool-submit
@@ -289,7 +290,7 @@
                           :name "parent lock-order contender"))
                    (test-assert (tests--gate-await requested :timeout-seconds 2)
                                 "admission reaches its parent lifecycle lock")
-                   (let* ((lock (cl-jobpond::job-pool--lock children))
+                   (let* ((lock     (cl-jobpond::job-pool--lock children))
                           (acquired (bordeaux-threads:acquire-lock lock nil)))
                      (when acquired (bordeaux-threads:release-lock lock))
                      (test-assert acquired
@@ -304,22 +305,22 @@
 
 (defun tests--failed-interrupt-delivery ()
   "Continue sibling notification and queued publication after one interrupt fails."
-  (let ((started-left (tests--make-gate))
+  (let ((started-left  (tests--make-gate))
         (started-right (tests--make-gate))
-        (release (tests--make-gate))
-        (original (symbol-function 'bordeaux-threads:interrupt-thread))
-        (attempts 0))
+        (release       (tests--make-gate))
+        (original      (symbol-function 'bordeaux-threads:interrupt-thread))
+        (attempts      0))
     (with-test-pool (roots :name "failed delivery roots")
       (with-test-pool (left-pool :name "failed delivery left")
         (with-test-pool (right-pool :name "failed delivery right")
-          (let* ((root (job-pool-submit roots (constantly nil) :inline-only-p t))
-                 (left (job-pool-submit
-                        left-pool
-                        (lambda (job)
-                          (declare (ignore job))
-                          (tests--gate-open started-left)
-                          (tests--gate-await release))
-                        :parent-job root))
+          (let* ((root  (job-pool-submit roots (constantly nil) :inline-only-p t))
+                 (left  (job-pool-submit
+                         left-pool
+                         (lambda (job)
+                           (declare (ignore job))
+                           (tests--gate-open started-left)
+                           (tests--gate-await release))
+                         :parent-job root))
                  (right (job-pool-submit
                          right-pool
                          (lambda (job)

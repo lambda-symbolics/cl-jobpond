@@ -111,7 +111,7 @@
 
 (defun coordination--claim-next-tests ()
   "Claim in enqueue order without writing on empty or closed schedulers."
-  (let* ((writes 0)
+  (let* ((writes    0)
          (scheduler (cl-jobpond:make-scheduler
                      :store (lambda (snapshot) (declare (ignore snapshot)) (incf writes)))))
     (coordination--check (null (cl-jobpond:scheduler-claim-next scheduler)))
