@@ -11,8 +11,7 @@
   (:documentation
    "A serious condition that is neither an ERROR nor a JOB-ABORTED.
 
-A job body signalling this escapes the execution handlers and must be caught by
-the worker-loop backstop instead."))
+A job body signalling this exercises the backstop for claimed execution."))
 
 (defclass tests--gate ()
   ((lock
@@ -1555,6 +1554,58 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
         (tests--gate-open release))))
   nil)
 
+(defun tests--inline-serious-failure ()
+  "Settle claimed inline failures and wake an installed waiter even if the hook fails."
+  (with-test-pool (pool :name "cl-jobpond test inline failure" :start-threads-p nil)
+    (dolist (hook-fails-p '(nil t))
+      (let* ((cause      (make-condition 'tests--rude-condition))
+             (hook-cause (make-condition 'simple-error :format-control "terminal hook failed"))
+             (returned   (tests--make-gate))
+             (job        (job-pool-submit
+                            pool
+                            (lambda (job)
+                              (declare (ignore job))
+                              (signal cause))
+                            :inline-only-p                t
+                            :maximum-runtime-milliseconds 60000
+                            :terminal-result-function
+                            (when hook-fails-p
+                              (lambda (job state result report)
+                                (declare (ignore job state result report))
+                                (error hook-cause)))))
+             (waiter     (make-thread
+                            (lambda ()
+                              (when (eq (job-await-any (list job) :timeout-seconds 10)
+                                        job)
+                                (tests--gate-open returned))))))
+        (unwind-protect
+             (progn
+               (test-assert (tests--wait-until
+                             (lambda ()
+                               (with-lock-held ((cl-jobpond::job--lock job))
+                                 (cl-jobpond::job--waiters job)))
+                             :timeout-seconds 3)
+                            "the waiter registers before inline execution")
+               (test-assert (job-run-inline job)
+                            "the inline claim returns after a serious condition")
+               (test-assert (tests--gate-await returned :timeout-seconds 3)
+                            "failure publication wakes the waiter before its timeout")
+               (test-assert (eq (job-state job) :failed)
+                            "the inline job publishes a failed outcome")
+               (let ((report (job-condition-report job)))
+                 (test-assert (search (princ-to-string cause) report)
+                              "the failure report carries the execution condition")
+                 (when hook-fails-p
+                   (test-assert (search (princ-to-string hook-cause) report)
+                                "forced publication also reports the hook condition")))
+               (test-assert (and (zerop (job-pool-live-count pool))
+                                 (null (job-run-token job))
+                                 (null (job-deadline job))
+                                 (null (cl-jobpond::job--waiters job)))
+                            "terminal failure releases ownership, deadline, and waiters"))
+          (join-thread waiter)))))
+  nil)
+
 (defun tests--cancellation-before-body-entry ()
   "Ensure cancellation reported at startup prevents body entry."
   (let ((pool            (make-job-pool :name                "startup cancellation"
@@ -1832,6 +1883,7 @@ publishing ~S, and bound token ~S is ~:[declined~;applied~]"
   (tests--retention-ring)
   (tests--inline-execution)
   (tests--inline-only-admission)
+  (tests--inline-serious-failure)
   (tests--deferred-threads)
   (tests--close-and-reopen)
   (tests--detach-refusal)

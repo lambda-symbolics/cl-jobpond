@@ -8,11 +8,7 @@
 A worker claims a job only while the pool has fewer running jobs than its
 concurrency bound, so the bound holds even when more workers exist than the
 bound allows. The worker sleeps on the pool condition variable between jobs, so
-admission and shutdown both wake it without polling.
-
-The nested handlers guarantee that a job never stays live after its worker gave
-up on it: normal execution publishes a result, an escaping condition publishes a
-failure, and a condition escaping that publication forces a terminal failure."
+admission and shutdown both wake it without polling."
   (loop
     (let ((job nil))
       (with-lock-held ((job-pool--lock pool))
@@ -28,21 +24,7 @@ failure, and a condition escaping that publication forces a terminal failure."
           (condition-wait (job-pool--condition-variable pool)
                           (job-pool--lock pool))))
       (unwind-protect
-           (handler-case
-               (job--execute job)
-             (serious-condition (condition)
-               (handler-case
-                   (unless (job-terminal-p job)
-                     (unless (job--publish-terminal
-                              job
-                              :failed
-                              nil
-                              :report (princ-to-string condition))
-                       (unless (job-terminal-p job)
-                         (job--force-terminal-failure job condition condition))))
-                 (serious-condition (publication-condition)
-                   (job--force-terminal-failure
-                    job condition publication-condition)))))
+           (job--execute-owned job)
         (with-lock-held ((job-pool--lock pool))
           (decf (job-pool--active-count pool))
           (jobpond--condition-broadcast

@@ -228,7 +228,7 @@ JOB-POOL-CLOSED without changing the pool."
 
 FUNCTION is called with the job as its only argument. Returning a value publishes
 :COMPLETED with that value, signalling JOB-ABORTED publishes :ABORTED, and
-signalling any other error publishes :FAILED with a bounded condition report."
+signalling any other serious condition publishes :FAILED with a bounded report."
   (first (job-pool-submit-batch
           pool
           (list (list :function                 function
@@ -276,5 +276,5 @@ claim in the first place and it is taken with a flag on the job instead."
                 (jobpond--condition-broadcast
                  (job-pool--condition-variable pool)))))))
     (when claimed-p
-      (job--execute job))
+      (job--execute-owned job))
     claimed-p))

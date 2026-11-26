@@ -109,7 +109,7 @@ record, never the terminal state."
 
 ;;;; -- Terminal Publication --
 
-(defun job--publish-terminal (job requested-state result &key report)
+(defun job--publish-terminal (job requested-state result &key report execution-condition)
   "Claim and publish exactly one terminal RESULT for JOB, returning T on success.
 
 Publication is single-writer. A job body returning normally, a deadline
@@ -128,7 +128,8 @@ A cancellation reason recorded before the claim downgrades REQUESTED-STATE to
 reports success.
 
 The job's :TERMINAL-RESULT-FUNCTION, when it has one, then decides what the
-terminal record actually contains. See JOB--RESOLVE-TERMINAL-RECORD."
+terminal record actually contains. See JOB--RESOLVE-TERMINAL-RECORD.
+If publication fails, retain EXECUTION-CONDITION alongside that failure."
   (let ((*terminal-publication-job* job)
         (publish-p                  nil)
         (state                      requested-state)
@@ -179,8 +180,15 @@ terminal record actually contains. See JOB--RESOLVE-TERMINAL-RECORD."
             (job--prune-settled-branch job)
             (job-pool-emit (job-pool job) :job-lifecycle event))
         (serious-condition (condition)
-          (job--force-terminal-failure job condition condition))))
+          (job--force-terminal-failure
+           job (or execution-condition condition) condition))))
     publish-p))
+
+(defun job--condition-report (condition)
+  "Print CONDITION, falling back to its type if its reporter fails."
+  (handler-case (princ-to-string condition)
+    (serious-condition ()
+      (princ-to-string (type-of condition)))))
 
 (defun job--force-terminal-failure
     (job execution-condition publication-condition)
@@ -196,7 +204,8 @@ terminal, so a lost broadcast cannot strand them."
          (report
            (jobpond--bounded-string
             (format nil "Job failure: ~A; publication failure: ~A"
-                    execution-condition publication-condition)))
+                     (job--condition-report execution-condition)
+                     (job--condition-report publication-condition))))
          (result (job--force-terminal-record job state report))
          (event  nil))
     (with-lock-held ((job--lock job))
@@ -282,3 +291,20 @@ interrupt delivered to this thread can prove it still belongs to this run."
                                    nil
                                    :report (princ-to-string condition)))))))
   nil)
+
+(defun job--execute-owned (job)
+  "Run claimed JOB and settle any serious condition that escapes execution."
+  (handler-case (job--execute job)
+    (serious-condition (condition)
+      (handler-case
+          (unless (job-terminal-p job)
+            (unless (job--publish-terminal
+                     job
+                     :failed
+                     nil
+                     :report              (princ-to-string condition)
+                     :execution-condition condition)
+              (unless (job-terminal-p job)
+                (job--force-terminal-failure job condition condition))))
+        (serious-condition (publication-condition)
+          (job--force-terminal-failure job condition publication-condition))))))

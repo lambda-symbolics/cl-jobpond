@@ -29,10 +29,9 @@ A job body is a function of one argument, the job itself. Its outcome is typed:
 
 - returning a value publishes =:completed= with that value as the result
 - signalling =job-aborted= publishes =:aborted=
-- signalling any other error publishes =:failed= with a bounded condition report
+- signalling any other serious condition publishes =:failed= with a bounded condition report
 
-A body that escapes even those paths is caught by the worker backstop and
-published as =:failed=. A job that has been admitted always becomes terminal.
+The same outcome rules apply on pool workers and when running a job inline.
 
 =job-snapshot= returns a coherent plist of state, result, cancellation reason,
 condition report, timings, and progress. Prefer the snapshot when several
